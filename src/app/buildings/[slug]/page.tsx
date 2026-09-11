@@ -250,7 +250,7 @@ export default async function BuildingDetailPage({
             </div>
           )}
 
-          <a
+          
             href={`/advisory?building=${encodeURIComponent(building.name)}`}
             className="mt-6 block text-center border border-navy text-navy px-6 py-3 text-sm hover:bg-navy hover:text-white transition-colors"
           >
