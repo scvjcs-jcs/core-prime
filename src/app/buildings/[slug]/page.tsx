@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { LISTING_STATUS_LABEL } from "@/lib/labels";
 
 async function getBuilding(slug: string) {
   const supabase = await createClient();
@@ -13,7 +14,7 @@ async function getBuilding(slug: string) {
 
   if (!building) return null;
 
-  const [{ data: images }, { data: transportation }, { data: parking }, { data: scores }] =
+  const [{ data: images }, { data: transportation }, { data: parking }, { data: scores }, { data: listings }] =
     await Promise.all([
       supabase
         .from("building_images")
@@ -24,9 +25,22 @@ async function getBuilding(slug: string) {
       supabase.from("building_transportation").select("*").eq("building_id", building.id),
       supabase.from("building_parking").select("*").eq("building_id", building.id).maybeSingle(),
       supabase.from("building_scores").select("*").eq("building_id", building.id).maybeSingle(),
+      supabase
+        .from("listings")
+        .select("*")
+        .eq("building_id", building.id)
+        .eq("is_published", true)
+        .order("created_at", { ascending: false }),
     ]);
 
-  return { building, images: images ?? [], transportation: transportation ?? [], parking, scores };
+  return {
+    building,
+    images: images ?? [],
+    transportation: transportation ?? [],
+    parking,
+    scores,
+    listings: listings ?? [],
+  };
 }
 
 export async function generateMetadata({
@@ -75,7 +89,7 @@ export default async function BuildingDetailPage({
   const data = await getBuilding(slug);
   if (!data) notFound();
 
-  const { building, images, transportation, parking, scores } = data;
+  const { building, images, transportation, parking, scores, listings } = data;
   const primaryImage = images.find((i) => i.is_primary)?.url ?? images[0]?.url ?? null;
 
   const jsonLd = {
@@ -83,7 +97,7 @@ export default async function BuildingDetailPage({
     "@type": "RealEstateListing",
     name: building.name,
     address: building.address ?? undefined,
-    url: `https://core-prime-8zg6gcr9g-scvjcs-8407.vercel.app/buildings/${building.slug}`,
+    url: `https://core-prime-jade.vercel.app/buildings/${building.slug}`,
     image: primaryImage ?? undefined,
   };
 
@@ -168,6 +182,33 @@ export default async function BuildingDetailPage({
             </section>
           )}
 
+          {listings.length > 0 && (
+            <section>
+              <h2 className="text-sm tracking-wide text-silver mb-4 border-b border-silver/20 pb-2">
+                임대 매물
+              </h2>
+              <div className="space-y-3">
+                {listings.map((l) => (
+                  <div key={l.id} className="border border-silver/30 p-4 flex flex-wrap items-center justify-between gap-2 text-sm">
+                    <div>
+                      <p className="kr-text">
+                        {l.floor ?? "층 미정"} · {l.exclusive_area ? `전용 ${l.exclusive_area}㎡` : "면적 문의"}
+                      </p>
+                      <p className="text-silver text-xs mt-1">
+                        {l.deposit || l.monthly_rent
+                          ? `보증금 ${l.deposit?.toLocaleString() ?? "-"}만원 / 월 ${l.monthly_rent?.toLocaleString() ?? "-"}만원`
+                          : "임대 조건 문의"}
+                      </p>
+                    </div>
+                    <span className="text-xs text-navy bg-fog px-2 py-0.5 border border-silver/30">
+                      {LISTING_STATUS_LABEL[l.status] ?? l.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
           {parking && (
             <section>
               <h2 className="text-sm tracking-wide text-silver mb-4 border-b border-silver/20 pb-2">
@@ -210,7 +251,7 @@ export default async function BuildingDetailPage({
           )}
 
           <a
-            href="/advisory"
+            href={`/advisory?building=${encodeURIComponent(building.name)}`}
             className="mt-6 block text-center border border-navy text-navy px-6 py-3 text-sm hover:bg-navy hover:text-white transition-colors"
           >
             이 건물로 상담 신청

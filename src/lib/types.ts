@@ -120,3 +120,78 @@ export type BuildingImage = {
   is_published: boolean;
   created_at: string;
 };
+
+// ===== Phase 3: 고객 상담(CRM) + 매물(Listings) =====
+
+export type CustomerStatus =
+  | "NEW"
+  | "CONSULTING"
+  | "PROPOSAL"
+  | "VISIT"
+  | "NEGOTIATION"
+  | "CONTRACT"
+  | "COMPLETED"
+  | "HOLD"
+  | "CLOSED";
+
+export type Customer = {
+  id: string;
+  company_name: string | null;
+  contact_name: string;
+  phone: string | null;
+  email: string | null;
+  headcount: number | null;
+  inquiry_channel: string | null;
+  status: CustomerStatus;
+  memo: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CustomerRequirement = {
+  id?: string;
+  customer_id?: string;
+  preferred_district: string | null;
+  min_exclusive_area: number | null;
+  max_exclusive_area: number | null;
+  min_budget: number | null;
+  max_budget: number | null;
+  move_in_date: string | null;
+  required_parking: number | null;
+  preferred_grade: string | null;
+  preferred_age: number | null;
+  etc_notes: string | null;
+};
+
+export type ListingStatus =
+  | "available"
+  | "negotiating"
+  | "contracting"
+  | "leased"
+  | "hold"
+  | "hidden";
+
+export type Listing = {
+  id: string;
+  listing_code: string | null;
+  building_id: string;
+  floor: string | null;
+  gross_area: number | null;
+  exclusive_area: number | null;
+  efficiency_ratio: number | null;
+  deposit: number | null;
+  monthly_rent: number | null;
+  management_fee: number | null;
+  parking_spaces: number | null;
+  additional_parking_fee: number | null;
+  available_date: string | null;
+  lease_term_months: number | null;
+  interior_status: string | null;
+  restoration_required: boolean;
+  status: ListingStatus;
+  description: string | null;
+  is_featured: boolean;
+  is_published: boolean;
+  created_at: string;
+  updated_at: string;
+};

@@ -4,14 +4,23 @@ import { createClient } from "@/lib/supabase/server";
 export default async function AdminDashboardPage() {
   const supabase = await createClient();
 
-  const [{ count: totalBuildings }, { count: publishedBuildings }] =
-    await Promise.all([
-      supabase.from("buildings").select("*", { count: "exact", head: true }),
-      supabase
-        .from("buildings")
-        .select("*", { count: "exact", head: true })
-        .eq("is_published", true),
-    ]);
+  const [
+    { count: totalBuildings },
+    { count: publishedBuildings },
+    { count: totalListings },
+    { count: newInquiries },
+  ] = await Promise.all([
+    supabase.from("buildings").select("*", { count: "exact", head: true }),
+    supabase
+      .from("buildings")
+      .select("*", { count: "exact", head: true })
+      .eq("is_published", true),
+    supabase.from("listings").select("*", { count: "exact", head: true }),
+    supabase
+      .from("customers")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "NEW"),
+  ]);
 
   const { data: recentBuildings } = await supabase
     .from("buildings")
@@ -19,9 +28,17 @@ export default async function AdminDashboardPage() {
     .order("created_at", { ascending: false })
     .limit(5);
 
+  const { data: recentInquiries } = await supabase
+    .from("customers")
+    .select("id, contact_name, company_name, status, created_at")
+    .order("created_at", { ascending: false })
+    .limit(5);
+
   const cards = [
     { label: "총 건물 수", value: totalBuildings ?? 0 },
     { label: "공개 건물 수", value: publishedBuildings ?? 0 },
+    { label: "등록 매물 수", value: totalListings ?? 0 },
+    { label: "신규 상담 문의", value: newInquiries ?? 0 },
   ];
 
   return (
@@ -72,6 +89,40 @@ export default async function AdminDashboardPage() {
         ) : (
           <p className="px-4 py-8 text-center text-silver text-sm">
             아직 등록된 건물이 없습니다.
+          </p>
+        )}
+      </div>
+
+      <div className="flex items-center justify-between mb-4 mt-10">
+        <h2 className="text-sm tracking-wide text-charcoal">최근 상담 신청</h2>
+        <Link href="/admin/customers" className="text-sm text-navy hover:underline">
+          전체보기 →
+        </Link>
+      </div>
+
+      <div className="bg-white border border-silver/30">
+        {recentInquiries && recentInquiries.length > 0 ? (
+          <table className="w-full text-sm">
+            <tbody>
+              {recentInquiries.map((c) => (
+                <tr key={c.id} className="border-b border-silver/20 last:border-0">
+                  <td className="px-4 py-3">
+                    <Link href={`/admin/customers/${c.id}`} className="hover:underline">
+                      {c.contact_name}
+                      {c.company_name ? ` (${c.company_name})` : ""}
+                    </Link>
+                  </td>
+                  <td className="px-4 py-3 text-silver">{c.status}</td>
+                  <td className="px-4 py-3 text-silver">
+                    {new Date(c.created_at).toLocaleDateString("ko-KR")}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="px-4 py-8 text-center text-silver text-sm">
+            아직 접수된 상담 신청이 없습니다.
           </p>
         )}
       </div>

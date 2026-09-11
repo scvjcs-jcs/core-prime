@@ -584,6 +584,40 @@ create policy building_images_storage_admin_delete on storage.objects
   for delete to authenticated
   using (bucket_id = 'building-images' and is_admin());
 
+-- ===== PHASE 3: 공개 상담 신청 + 매물(Listings) 관리 =====
+
+-- 공개 상담 신청 폼에서 비로그인 방문자가 customers/customer_requirements 테이블에
+-- 새 행을 "추가"만 할 수 있도록 허용 (조회/수정/삭제는 여전히 관리자만 가능).
+-- 주의: RETURNING/select()를 쓰면 SELECT 권한이 추가로 필요해지므로, 서버 액션에서는
+-- id를 미리 생성해서 insert하고 RETURNING을 쓰지 않는 방식으로 우회함.
+create policy customers_public_insert on public.customers
+  for insert
+  to anon
+  with check (true);
+
+create policy customer_requirements_public_insert on public.customer_requirements
+  for insert
+  to anon
+  with check (true);
+
+-- 건물 상세페이지 등에서 공개된 매물을 보여줄 수 있도록 published listing 조회 허용
+create policy listings_public_select on public.listings
+  for select
+  to anon
+  using (
+    is_published = true
+    and exists (
+      select 1 from public.buildings b
+      where b.id = listings.building_id and b.is_published = true
+    )
+  );
+
+-- Phase 1에서 겪었던 것과 동일한 문제(RLS만으로는 부족, 테이블 기본 GRANT 필요)를
+-- 미리 방지하기 위해 명시적으로 권한 부여
+grant insert on public.customers to anon;
+grant insert on public.customer_requirements to anon;
+grant select on public.listings to anon;
+
 -- 완료: 여기까지 실행되면 스키마 준비가 끝난 것입니다.
 -- (참고: 위 모든 마이그레이션은 Claude가 Supabase 연동을 통해 이미 이 프로젝트의
 --  실제 데이터베이스에 적용해 두었습니다. 이 파일은 기록/백업 목적입니다.)

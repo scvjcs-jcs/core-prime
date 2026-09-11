@@ -28,6 +28,12 @@ export default function AdminNav({
             <Link href="/admin/buildings" className="hover:text-white transition-colors">
               건물 관리
             </Link>
+            <Link href="/admin/listings" className="hover:text-white transition-colors">
+              매물 관리
+            </Link>
+            <Link href="/admin/customers" className="hover:text-white transition-colors">
+              고객 상담
+            </Link>
           </nav>
         </div>
         <div className="flex items-center gap-4 text-sm">
