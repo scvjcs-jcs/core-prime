@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body {
+  padding: 0;
+  margin: 0;
+}
+
+body {
+  background-color: #ffffff;
+  color: #1a1c20;
+  font-family: "Pretendard", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+/* 한글은 어절 단위로만 줄바꿈 */
+.kr-text, body {
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+.font-display {
+  font-family: var(--font-newsreader), "Newsreader", serif;
+}
