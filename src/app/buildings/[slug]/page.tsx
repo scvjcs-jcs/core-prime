@@ -83,7 +83,7 @@ export default async function BuildingDetailPage({
     "@type": "RealEstateListing",
     name: building.name,
     address: building.address ?? undefined,
-    url: `https://core-prime-8zg6gcr9g-scvjcs-8407.vercel.app/buildings/${building.slug}`,
+       url: `https://core-prime-jade.vercel.app/buildings/${building.slug}`,
     image: primaryImage ?? undefined,
   };
 
