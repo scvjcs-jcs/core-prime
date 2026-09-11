@@ -11,13 +11,14 @@ export default async function EditBuildingPage({
   const { id } = await params;
   const supabase = await createClient();
 
-  const [{ data: districts }, { data: building }, { data: parking }, { data: scores }, { data: transportation }] =
+  const [{ data: districts }, { data: building }, { data: parking }, { data: scores }, { data: transportation }, { data: images }] =
     await Promise.all([
       supabase.from("districts").select("id, name").order("name"),
       supabase.from("buildings").select("*").eq("id", id).maybeSingle(),
       supabase.from("building_parking").select("*").eq("building_id", id).maybeSingle(),
       supabase.from("building_scores").select("*").eq("building_id", id).maybeSingle(),
       supabase.from("building_transportation").select("*").eq("building_id", id),
+      supabase.from("building_images").select("*").eq("building_id", id).order("sort_order"),
     ]);
 
   if (!building) {
@@ -99,7 +100,13 @@ export default async function EditBuildingPage({
   return (
     <div>
       <h1 className="font-display text-2xl mb-6">건물 수정 — {building.name}</h1>
-      <BuildingForm mode="edit" buildingId={id} districts={districts ?? []} initial={initial} />
+      <BuildingForm
+        mode="edit"
+        buildingId={id}
+        districts={districts ?? []}
+        initial={initial}
+        initialImages={images ?? []}
+      />
     </div>
   );
 }

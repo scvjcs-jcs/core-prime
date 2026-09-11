@@ -492,4 +492,98 @@ insert into districts (name, name_en, slug, is_published) values
   ('판교', 'Pangyo', 'pangyo', true)
 on conflict (slug) do nothing;
 
+-- =============================================================
+-- [추가 마이그레이션] 함수 search_path 보안 경고 수정
+-- =============================================================
+create or replace function set_updated_at()
+returns trigger as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$ language plpgsql set search_path = public;
+
+create or replace function calc_building_total_score()
+returns trigger as $$
+begin
+  new.total_score = round(
+    (new.location_score + new.transportation_score + new.building_quality_score
+     + new.parking_score + new.amenities_score + new.corporate_image_score
+     + new.employee_access_score)::numeric / 7.0, 2
+  );
+  new.updated_at = now();
+  return new;
+end;
+$$ language plpgsql set search_path = public;
+
+-- =============================================================
+-- [추가 마이그레이션] 테이블 GRANT 누락 수정 (매우 중요)
+-- RLS 정책만으로는 부족하고, 테이블 자체에 대한 기본 권한(GRANT)이 있어야
+-- anon/authenticated 역할이 테이블에 접근할 수 있습니다.
+-- =============================================================
+grant usage on schema public to anon, authenticated;
+grant select on districts, buildings to anon;
+grant select, insert, update, delete on
+  districts, buildings, building_images, building_transportation, building_parking,
+  building_scores, building_contents, listings, listing_images, customers,
+  customer_requirements, proposals, proposal_buildings, admins, site_settings
+to authenticated;
+alter default privileges in schema public grant select, insert, update, delete on tables to authenticated;
+alter default privileges in schema public grant select on tables to anon;
+
+-- =============================================================
+-- [추가 마이그레이션] Phase 2: 공개 열람 정책 + 이미지 Storage 버킷
+-- =============================================================
+grant select on building_images, building_transportation, building_parking, building_scores to anon;
+
+drop policy if exists building_images_public_select on building_images;
+create policy building_images_public_select on building_images
+  for select using (
+    is_published = true
+    and exists (select 1 from buildings b where b.id = building_images.building_id and b.is_published = true)
+  );
+
+drop policy if exists building_transportation_public_select on building_transportation;
+create policy building_transportation_public_select on building_transportation
+  for select using (
+    exists (select 1 from buildings b where b.id = building_transportation.building_id and b.is_published = true)
+  );
+
+drop policy if exists building_parking_public_select on building_parking;
+create policy building_parking_public_select on building_parking
+  for select using (
+    exists (select 1 from buildings b where b.id = building_parking.building_id and b.is_published = true)
+  );
+
+drop policy if exists building_scores_public_select on building_scores;
+create policy building_scores_public_select on building_scores
+  for select using (
+    exists (select 1 from buildings b where b.id = building_scores.building_id and b.is_published = true)
+  );
+
+insert into storage.buckets (id, name, public)
+values ('building-images', 'building-images', true)
+on conflict (id) do nothing;
+
+drop policy if exists building_images_storage_public_select on storage.objects;
+create policy building_images_storage_public_select on storage.objects
+  for select using (bucket_id = 'building-images');
+
+drop policy if exists building_images_storage_admin_insert on storage.objects;
+create policy building_images_storage_admin_insert on storage.objects
+  for insert to authenticated
+  with check (bucket_id = 'building-images' and is_admin());
+
+drop policy if exists building_images_storage_admin_update on storage.objects;
+create policy building_images_storage_admin_update on storage.objects
+  for update to authenticated
+  using (bucket_id = 'building-images' and is_admin());
+
+drop policy if exists building_images_storage_admin_delete on storage.objects;
+create policy building_images_storage_admin_delete on storage.objects
+  for delete to authenticated
+  using (bucket_id = 'building-images' and is_admin());
+
 -- 완료: 여기까지 실행되면 스키마 준비가 끝난 것입니다.
+-- (참고: 위 모든 마이그레이션은 Claude가 Supabase 연동을 통해 이미 이 프로젝트의
+--  실제 데이터베이스에 적용해 두었습니다. 이 파일은 기록/백업 목적입니다.)

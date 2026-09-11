@@ -94,3 +94,29 @@ export type BuildingScores = {
   employee_access_score: number;
   total_score?: number;
 };
+
+export type BuildingImageType =
+  | "exterior"
+  | "lobby"
+  | "office"
+  | "parking"
+  | "amenity"
+  | "night"
+  | "aerial"
+  | "floor_plan"
+  | "map"
+  | "other";
+
+export type BuildingImage = {
+  id: string;
+  building_id: string;
+  type: BuildingImageType;
+  url: string;
+  thumbnail_url: string | null;
+  title: string | null;
+  alt_text: string | null;
+  is_primary: boolean;
+  sort_order: number;
+  is_published: boolean;
+  created_at: string;
+};
