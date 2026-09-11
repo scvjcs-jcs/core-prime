@@ -248,10 +248,10 @@ export default async function BuildingDetailPage({
                 ))}
               </div>
             </div>
-          )}
+   )}
 
-          
-            href={`/advisory?building=${encodeURIComponent(building.name)}`}
+             
+             href={`/advisory?building=${encodeURIComponent(building.name)}`}
             className="mt-6 block text-center border border-navy text-navy px-6 py-3 text-sm hover:bg-navy hover:text-white transition-colors"
           >
             이 건물로 상담 신청
