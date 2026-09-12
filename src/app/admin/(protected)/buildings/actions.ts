@@ -49,14 +49,29 @@ export type BuildingFormPayload = {
 };
 
 function slugify(input: string): string {
+  // 한글이 슬러그(URL 주소)에 들어가면 일부 환경에서 건물 상세페이지가
+  // 404로 뜨는 문제가 있어, 영문/숫자만 남기고 한글은 제거합니다.
+  // (건물명 자체는 그대로 표시되고, 한글이 사라지는 건 주소창의 영문 부분뿐입니다.)
   const base = input
     .toLowerCase()
     .trim()
-    .replace(/[^a-z0-9가-힣\s-]/g, "")
+    .replace(/[^a-z0-9\s-]/g, "")
     .replace(/\s+/g, "-")
-    .replace(/-+/g, "-");
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
   const random = Math.random().toString(36).slice(2, 7);
   return base ? `${base}-${random}` : `building-${random}`;
+}
+
+// 관리자가 URL 슬러그를 직접 입력한 경우에도 한글/특수문자가 섞이면 상세페이지가
+// 404로 뜨는 문제가 있어, 영문/숫자/하이픈만 남기고 나머지는 제거합니다.
+function sanitizeManualSlug(input: string): string {
+  return input
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 export async function createBuilding(
@@ -64,9 +79,8 @@ export async function createBuilding(
 ): Promise<{ error?: string; id?: string }> {
   const supabase = await createClient();
 
-  const slug =
-    payload.basic.slug?.trim() ||
-    slugify(payload.basic.name_en || payload.basic.name);
+  const manualSlug = sanitizeManualSlug(payload.basic.slug ?? "");
+  const slug = manualSlug || slugify(payload.basic.name_en || payload.basic.name);
 
   const { data: building, error } = await supabase
     .from("buildings")
@@ -131,7 +145,7 @@ export async function updateBuilding(
       alias: payload.basic.alias || null,
       building_code: payload.basic.building_code || null,
       district_id: payload.basic.district_id || null,
-      slug: payload.basic.slug?.trim() || undefined,
+      slug: sanitizeManualSlug(payload.basic.slug ?? "") || undefined,
       completion_year: payload.info.completion_year,
       basement_floors: payload.info.basement_floors,
       above_ground_floors: payload.info.above_ground_floors,

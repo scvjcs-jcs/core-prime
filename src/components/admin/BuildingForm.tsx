@@ -246,7 +246,9 @@ export default function BuildingForm({
               </select>
             </div>
             <div>
-              <label className={labelCls}>URL 슬러그 (비워두면 자동 생성)</label>
+              <label className={labelCls}>
+                URL 슬러그 (비워두면 자동 생성, 영문/숫자/하이픈만 입력 — 한글은 자동으로 빠집니다)
+              </label>
               <input
                 className={inputCls}
                 value={form.basic.slug}
