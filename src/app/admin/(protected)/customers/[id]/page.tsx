@@ -32,10 +32,18 @@ export default async function AdminCustomerDetailPage({
         <Link href="/admin/customers" className="text-sm text-silver hover:text-navy">
           ← 목록으로
         </Link>
-        <h1 className="font-display text-2xl mt-2">
-          {customer.contact_name}
-          {customer.company_name ? ` (${customer.company_name})` : ""}
-        </h1>
+        <div className="flex items-center justify-between mt-2">
+          <h1 className="font-display text-2xl">
+            {customer.contact_name}
+            {customer.company_name ? ` (${customer.company_name})` : ""}
+          </h1>
+          <Link
+            href={`/admin/proposals/new?customer=${customer.id}`}
+            className="text-sm bg-navy text-white px-4 py-2 hover:bg-charcoal transition-colors"
+          >
+            + 제안서 만들기
+          </Link>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-8">

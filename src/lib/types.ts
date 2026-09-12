@@ -195,3 +195,64 @@ export type Listing = {
   created_at: string;
   updated_at: string;
 };
+
+// ===== Phase 4: 제안서(Proposal) =====
+
+export type ProposalStatus = "draft" | "sent" | "accepted" | "rejected";
+
+export type Proposal = {
+  id: string;
+  proposal_code: string | null;
+  customer_id: string;
+  title: string | null;
+  status: ProposalStatus;
+  public_token: string;
+  expires_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProposalBuilding = {
+  id?: string;
+  proposal_id?: string;
+  building_id: string;
+  listing_id: string | null;
+  recommendation_rank: number | null;
+  recommendation_reason: string | null;
+  pros: string | null;
+  cons: string | null;
+};
+
+// 공개 링크(get_proposal_by_token RPC)가 돌려주는 형태
+export type PublicProposal = {
+  id: string;
+  proposal_code: string | null;
+  title: string | null;
+  status: ProposalStatus;
+  created_at: string;
+  expires_at: string | null;
+  customer_name: string;
+  company_name: string | null;
+  buildings: {
+    proposal_building_id: string;
+    building_id: string;
+    name: string;
+    slug: string;
+    address: string | null;
+    building_grade: string | null;
+    completion_year: number | null;
+    recommendation_rank: number | null;
+    recommendation_reason: string | null;
+    pros: string | null;
+    cons: string | null;
+    image_url: string | null;
+    total_score: number | null;
+    listing: {
+      floor: string | null;
+      exclusive_area: number | null;
+      deposit: number | null;
+      monthly_rent: number | null;
+      management_fee: number | null;
+    } | null;
+  }[];
+};

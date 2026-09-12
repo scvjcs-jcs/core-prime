@@ -34,6 +34,9 @@ export default function AdminNav({
             <Link href="/admin/customers" className="hover:text-white transition-colors">
               고객 상담
             </Link>
+            <Link href="/admin/proposals" className="hover:text-white transition-colors">
+              제안서
+            </Link>
           </nav>
         </div>
         <div className="flex items-center gap-4 text-sm">

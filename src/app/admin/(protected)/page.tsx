@@ -9,6 +9,7 @@ export default async function AdminDashboardPage() {
     { count: publishedBuildings },
     { count: totalListings },
     { count: newInquiries },
+    { count: totalProposals },
   ] = await Promise.all([
     supabase.from("buildings").select("*", { count: "exact", head: true }),
     supabase
@@ -20,6 +21,7 @@ export default async function AdminDashboardPage() {
       .from("customers")
       .select("*", { count: "exact", head: true })
       .eq("status", "NEW"),
+    supabase.from("proposals").select("*", { count: "exact", head: true }),
   ]);
 
   const { data: recentBuildings } = await supabase
@@ -39,13 +41,14 @@ export default async function AdminDashboardPage() {
     { label: "공개 건물 수", value: publishedBuildings ?? 0 },
     { label: "등록 매물 수", value: totalListings ?? 0 },
     { label: "신규 상담 문의", value: newInquiries ?? 0 },
+    { label: "작성된 제안서", value: totalProposals ?? 0 },
   ];
 
   return (
     <div>
       <h1 className="font-display text-2xl mb-6">대시보드</h1>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-10">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-10">
         {cards.map((c) => (
           <div key={c.label} className="bg-white border border-silver/30 p-5">
             <p className="text-xs text-silver mb-1">{c.label}</p>

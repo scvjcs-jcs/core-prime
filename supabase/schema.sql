@@ -618,6 +618,84 @@ grant insert on public.customers to anon;
 grant insert on public.customer_requirements to anon;
 grant select on public.listings to anon;
 
+-- ===== PHASE 4: 제안서(Proposal) 공개 조회 =====
+
+-- proposals/proposal_buildings 테이블은 고객 개인정보가 포함돼 있어 anon에게 테이블 전체를
+-- 열어줄 수 없음. 대신 public_token(추측 불가능한 랜덤 문자열)을 정확히 아는 사람만
+-- 해당 제안서 1건을 조회할 수 있도록 SECURITY DEFINER 함수로 제공 (RLS를 우회하되,
+-- 함수 내부에서 토큰이 정확히 일치하는 딱 1건만 JSON으로 반환).
+create or replace function public.get_proposal_by_token(p_token text)
+returns json
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  result json;
+begin
+  select json_build_object(
+    'id', p.id,
+    'proposal_code', p.proposal_code,
+    'title', p.title,
+    'status', p.status,
+    'created_at', p.created_at,
+    'expires_at', p.expires_at,
+    'customer_name', c.contact_name,
+    'company_name', c.company_name,
+    'buildings', (
+      select coalesce(json_agg(
+        json_build_object(
+          'proposal_building_id', pb.id,
+          'building_id', b.id,
+          'name', b.name,
+          'slug', b.slug,
+          'address', b.address,
+          'building_grade', b.building_grade,
+          'completion_year', b.completion_year,
+          'recommendation_rank', pb.recommendation_rank,
+          'recommendation_reason', pb.recommendation_reason,
+          'pros', pb.pros,
+          'cons', pb.cons,
+          'image_url', (
+            select bi.url from building_images bi
+            where bi.building_id = b.id and bi.is_primary = true
+            limit 1
+          ),
+          'total_score', (
+            select bs.total_score from building_scores bs
+            where bs.building_id = b.id
+          ),
+          'listing', (
+            select json_build_object(
+              'floor', l.floor,
+              'exclusive_area', l.exclusive_area,
+              'deposit', l.deposit,
+              'monthly_rent', l.monthly_rent,
+              'management_fee', l.management_fee
+            )
+            from listings l where l.id = pb.listing_id
+          )
+        )
+        order by coalesce(pb.recommendation_rank, 999)
+      ), '[]'::json)
+      from proposal_buildings pb
+      join buildings b on b.id = pb.building_id
+      where pb.proposal_id = p.id
+    )
+  )
+  into result
+  from proposals p
+  join customers c on c.id = p.customer_id
+  where p.public_token = p_token
+    and p.status <> 'draft'
+    and (p.expires_at is null or p.expires_at > now());
+
+  return result;
+end;
+$$;
+
+grant execute on function public.get_proposal_by_token(text) to anon;
+
 -- 완료: 여기까지 실행되면 스키마 준비가 끝난 것입니다.
 -- (참고: 위 모든 마이그레이션은 Claude가 Supabase 연동을 통해 이미 이 프로젝트의
 --  실제 데이터베이스에 적용해 두었습니다. 이 파일은 기록/백업 목적입니다.)
