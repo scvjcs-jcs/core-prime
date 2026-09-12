@@ -696,6 +696,35 @@ $$;
 
 grant execute on function public.get_proposal_by_token(text) to anon;
 
+-- ===== PHASE 5: 방문자 통계(조회수) =====
+
+create table if not exists page_views (
+  id uuid primary key default gen_random_uuid(),
+  path text not null,
+  building_id uuid references buildings(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists page_views_building_id_idx on page_views(building_id);
+create index if not exists page_views_created_at_idx on page_views(created_at);
+create index if not exists page_views_path_idx on page_views(path);
+
+alter table page_views enable row level security;
+
+-- 방문자(anon)는 조회 기록을 "추가"만 할 수 있음 (자신이 남긴 기록도 다시 읽을 수 없음)
+create policy page_views_public_insert on page_views
+  for insert
+  to anon
+  with check (true);
+
+-- 통계는 관리자만 볼 수 있음
+create policy page_views_admin_select on page_views
+  for select
+  using (is_admin());
+
+grant insert on page_views to anon;
+grant select on page_views to authenticated;
+
 -- 완료: 여기까지 실행되면 스키마 준비가 끝난 것입니다.
 -- (참고: 위 모든 마이그레이션은 Claude가 Supabase 연동을 통해 이미 이 프로젝트의
 --  실제 데이터베이스에 적용해 두었습니다. 이 파일은 기록/백업 목적입니다.)

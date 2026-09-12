@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
+import { logPageView } from "@/lib/analytics";
 
 type FeaturedBuilding = {
   id: string;
@@ -14,7 +15,8 @@ type FeaturedBuilding = {
 export default async function HomePage() {
   const supabase = await createClient();
 
-  const [{ data: districts }, { data: buildingsRaw }] = await Promise.all([
+  const [, { data: districts }, { data: buildingsRaw }] = await Promise.all([
+    logPageView("/"),
     supabase.from("districts").select("id, name, slug").eq("is_published", true).order("name"),
     supabase
       .from("buildings")

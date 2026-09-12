@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
+import { logPageView } from "@/lib/analytics";
 
 export const metadata: Metadata = {
   title: "PRIME BUILDINGS | CORE PRIME",
@@ -47,7 +48,8 @@ export default async function BuildingsPage({
   const params = await searchParams;
   const supabase = await createClient();
 
-  const [{ data: districts }, { data: buildingsRaw }] = await Promise.all([
+  const [, { data: districts }, { data: buildingsRaw }] = await Promise.all([
+    logPageView("/buildings"),
     supabase.from("districts").select("id, name, slug").order("name"),
     supabase
       .from("buildings")

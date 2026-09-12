@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { LISTING_STATUS_LABEL } from "@/lib/labels";
+import { logPageView } from "@/lib/analytics";
 
 async function getBuilding(slug: string) {
   const supabase = await createClient();
@@ -91,6 +92,10 @@ export default async function BuildingDetailPage({
 
   const { building, images, transportation, parking, scores, listings } = data;
   const primaryImage = images.find((i) => i.is_primary)?.url ?? images[0]?.url ?? null;
+
+  // 조회수 기록 — generateMetadata에서 한 번, 이 컴포넌트에서 한 번 getBuilding()이 호출되어
+  // 중복 집계될 수 있으므로, 조회 기록은 반드시 이 페이지 컴포넌트에서만 남깁니다.
+  await logPageView(`/buildings/${slug}`, building.id);
 
   const jsonLd = {
     "@context": "https://schema.org",

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import AdvisoryForm from "@/components/AdvisoryForm";
+import { logPageView } from "@/lib/analytics";
 
 export const metadata: Metadata = {
   title: "OFFICE ADVISORY | CORE PRIME",
@@ -14,11 +15,10 @@ export default async function AdvisoryPage({
 }) {
   const { building } = await searchParams;
   const supabase = await createClient();
-  const { data: districts } = await supabase
-    .from("districts")
-    .select("id, name")
-    .eq("is_published", true)
-    .order("name");
+  const [, { data: districts }] = await Promise.all([
+    logPageView("/advisory"),
+    supabase.from("districts").select("id, name").eq("is_published", true).order("name"),
+  ]);
 
   const defaultNotes = building ? `관심 건물: ${building}` : undefined;
 
