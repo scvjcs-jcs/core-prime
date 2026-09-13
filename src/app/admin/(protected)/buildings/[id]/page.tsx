@@ -11,7 +11,7 @@ export default async function EditBuildingPage({
   const { id } = await params;
   const supabase = await createClient();
 
-  const [{ data: districts }, { data: building }, { data: parking }, { data: scores }, { data: transportation }, { data: images }] =
+  const [{ data: districts }, { data: building }, { data: parking }, { data: scores }, { data: transportation }, { data: images }, { data: contents }] =
     await Promise.all([
       supabase.from("districts").select("id, name").order("name"),
       supabase.from("buildings").select("*").eq("id", id).maybeSingle(),
@@ -19,6 +19,11 @@ export default async function EditBuildingPage({
       supabase.from("building_scores").select("*").eq("building_id", id).maybeSingle(),
       supabase.from("building_transportation").select("*").eq("building_id", id),
       supabase.from("building_images").select("*").eq("building_id", id).order("sort_order"),
+      supabase
+        .from("building_contents")
+        .select("*")
+        .eq("building_id", id)
+        .order("created_at", { ascending: false }),
     ]);
 
   if (!building) {
@@ -106,6 +111,7 @@ export default async function EditBuildingPage({
         districts={districts ?? []}
         initial={initial}
         initialImages={images ?? []}
+        initialContents={contents ?? []}
       />
     </div>
   );

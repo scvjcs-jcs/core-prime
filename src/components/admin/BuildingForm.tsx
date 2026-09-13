@@ -8,7 +8,8 @@ import {
   type BuildingFormPayload,
 } from "@/app/admin/(protected)/buildings/actions";
 import ImageUploader from "./ImageUploader";
-import type { BuildingImage } from "@/lib/types";
+import AIContentPanel from "./AIContentPanel";
+import type { BuildingContent, BuildingImage } from "@/lib/types";
 
 const TABS = [
   "기본정보",
@@ -16,6 +17,7 @@ const TABS = [
   "입지/교통",
   "주차",
   "사진",
+  "AI 콘텐츠",
   "Prime Score",
   "공개설정",
 ] as const;
@@ -92,12 +94,14 @@ export default function BuildingForm({
   districts,
   initial,
   initialImages,
+  initialContents,
 }: {
   mode: "create" | "edit";
   buildingId?: string;
   districts: DistrictOption[];
   initial?: BuildingFormPayload;
   initialImages?: BuildingImage[];
+  initialContents?: BuildingContent[];
 }) {
   const router = useRouter();
   const [tab, setTab] = useState(0);
@@ -608,6 +612,19 @@ export default function BuildingForm({
 
         {tab === 5 && (
           <div>
+            {mode === "create" || !buildingId ? (
+              <p className="text-sm text-silver py-8 text-center border border-dashed border-silver/40">
+                먼저 건물을 등록한 뒤 AI 콘텐츠를 생성할 수 있습니다. [기본정보] 탭에서 건물명을 입력하고
+                하단의 &apos;건물 등록&apos; 버튼을 눌러 저장해 주세요.
+              </p>
+            ) : (
+              <AIContentPanel buildingId={buildingId} initialContents={initialContents ?? []} />
+            )}
+          </div>
+        )}
+
+        {tab === 6 && (
+          <div>
             <p className="text-sm text-silver mb-4">
               각 항목을 0~100점으로 입력하면 총점(Total Score)은 자동으로 계산됩니다.
             </p>
@@ -646,7 +663,7 @@ export default function BuildingForm({
           </div>
         )}
 
-        {tab === 6 && (
+        {tab === 7 && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className={labelCls}>운영 상태</label>

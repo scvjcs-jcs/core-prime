@@ -256,3 +256,18 @@ export type PublicProposal = {
     } | null;
   }[];
 };
+
+// ===== Phase 5: AI 콘텐츠 생성 =====
+
+// DB의 building_contents_content_type_check 제약조건과 반드시 일치해야 합니다.
+export type ContentType = "intro" | "blog" | "sns";
+
+export type BuildingContent = {
+  id: string;
+  building_id: string;
+  content_type: ContentType;
+  body: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
