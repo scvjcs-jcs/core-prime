@@ -780,3 +780,73 @@ export async function runBuildingMatching(sourceDocumentId: string): Promise<{
   revalidatePath("/admin/imports");
   return { autoMatched, reviewRequired, newCandidates };
 }
+
+export type ListingCorrectionPayload = {
+  floor?: string | null;
+  unit?: string | null;
+  gross_area?: number | null;
+  gross_area_py?: number | null;
+  exclusive_area?: number | null;
+  exclusive_area_py?: number | null;
+  deposit_per_py?: number | null;
+  rent_per_py?: number | null;
+  maintenance_per_py?: number | null;
+  noc_per_py?: number | null;
+  deposit_total_won?: number | null;
+  monthly_rent_total_won?: number | null;
+  management_fee_total_won?: number | null;
+  move_in_text?: string | null;
+  status?: string;
+  is_published?: boolean;
+};
+
+export async function applyListingCorrection(
+  sourceDocumentId: string,
+  stagingListingId: string,
+  patch: ListingCorrectionPayload,
+  note?: string
+): Promise<{ error?: string; listingId?: string; status?: string }> {
+  const { supabase, admin, error: authError } = await requireAdmin();
+  if (!admin) return { error: authError ?? "관리자 권한이 없는 계정입니다." };
+  if (!sourceDocumentId || !stagingListingId) return { error: "정정할 공실 정보가 없습니다." };
+
+  const { data, error } = await supabase.rpc("apply_listing_correction", {
+    p_staging_listing_id: stagingListingId,
+    p_patch: patch,
+    p_note: note?.trim() || null,
+  });
+  if (error) return { error: normalizeRpcError(error.message) };
+
+  const result = (data ?? {}) as Record<string, unknown>;
+  revalidatePath(`/admin/imports/${sourceDocumentId}`);
+  revalidatePath("/admin/listings");
+  revalidatePath("/buildings");
+  return {
+    listingId: typeof result.listing_id === "string" ? result.listing_id : undefined,
+    status: typeof result.status === "string" ? result.status : undefined,
+  };
+}
+
+export async function verifyListingWarningNoChange(
+  sourceDocumentId: string,
+  stagingListingId: string,
+  note?: string
+): Promise<{ error?: string; listingId?: string; status?: string }> {
+  const { supabase, admin, error: authError } = await requireAdmin();
+  if (!admin) return { error: authError ?? "관리자 권한이 없는 계정입니다." };
+  if (!sourceDocumentId || !stagingListingId) return { error: "검토할 공실 정보가 없습니다." };
+
+  const { data, error } = await supabase.rpc("verify_listing_warning_no_change", {
+    p_staging_listing_id: stagingListingId,
+    p_note: note?.trim() || null,
+  });
+  if (error) return { error: normalizeRpcError(error.message) };
+
+  const result = (data ?? {}) as Record<string, unknown>;
+  revalidatePath(`/admin/imports/${sourceDocumentId}`);
+  revalidatePath("/admin/listings");
+  return {
+    listingId: typeof result.listing_id === "string" ? result.listing_id : undefined,
+    status: typeof result.status === "string" ? result.status : undefined,
+  };
+}

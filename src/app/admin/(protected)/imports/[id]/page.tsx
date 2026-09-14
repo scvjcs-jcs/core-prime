@@ -6,6 +6,7 @@ import PdfExtractionControls from "@/components/admin/PdfExtractionControls";
 import ImportReviewControls from "@/components/admin/ImportReviewControls";
 import WarningReviewPanel from "@/components/admin/WarningReviewPanel";
 import InformationReviewPanel from "@/components/admin/InformationReviewPanel";
+import ListingCorrectionReviewPanel from "@/components/admin/ListingCorrectionReviewPanel";
 import type { ParsingRun, SourceDocumentPage } from "@/lib/types";
 import { NAI_PARSER_VERSION } from "@/lib/parsers/nai/NAIParser";
 import { CBRE_PARSER_VERSION } from "@/lib/parsers/cbre/CBREParser";
@@ -63,6 +64,16 @@ export default async function ImportDetailPage({ params }: { params: Promise<{ i
   const stagingBuildings = stagingBuildingsData ?? [];
   const { data: stagingListingsData } = latestRealRun ? await supabase.from("staging_listings").select("id,staging_building_id,floor,source_page,change_type,review_status,matched_listing_id,matched_building_id,extracted_data").eq("parsing_run_id",latestRealRun.id) : { data: [] as any[] };
   const stagingListings = stagingListingsData ?? [];
+
+  // 최종 승인 이후 오류/경고 공실을 개별 정정하기 위한 canonical listing + review 상태입니다.
+  const { data: canonicalListingsData } = await supabase.from("listings")
+    .select("id,building_id,floor,unit,gross_area,gross_area_py,exclusive_area,exclusive_area_py,deposit_per_py,rent_per_py,maintenance_per_py,noc_per_py,deposit_total_won,monthly_rent_total_won,management_fee_total_won,move_in_text,status,is_published,source_page")
+    .eq("source_document_id", id);
+  const canonicalListings = canonicalListingsData ?? [];
+  const { data: correctionReviewsData } = await supabase.from("listing_correction_reviews")
+    .select("staging_listing_id,listing_id,status,note")
+    .eq("source_document_id", id);
+  const correctionReviews = correctionReviewsData ?? [];
   const listingCountByBuilding = new Map<string,number>();
   const buildingNameById = new Map<string,string>();
   for (const b of stagingBuildings) buildingNameById.set(b.id, b.raw_building_name ?? "이름 없음");
@@ -90,6 +101,28 @@ export default async function ImportDetailPage({ params }: { params: Promise<{ i
     const ws = Array.isArray(l.extracted_data?._warnings) ? l.extracted_data._warnings : [];
     ws.forEach((reason:any, idx:number) => warningRows.push({ id:`l-${l.id}-${idx}`, scope:"LISTING", buildingName:buildingNameById.get(l.staging_building_id) ?? "이름 없음", floor:l.floor ?? null, page:l.source_page ?? null, reason:String(reason) }));
   }
+
+  const canonicalById = new Map<string, any>(canonicalListings.map((l:any)=>[l.id,l]));
+  const canonicalByFallback = new Map<string, any[]>();
+  for (const l of canonicalListings as any[]) {
+    const key = `${l.building_id ?? ""}|${l.source_page ?? ""}|${l.floor ?? ""}|${l.unit ?? ""}`;
+    const arr = canonicalByFallback.get(key) ?? []; arr.push(l); canonicalByFallback.set(key,arr);
+  }
+  const correctionByStaging = new Map<string, any>(correctionReviews.map((r:any)=>[r.staging_listing_id,r]));
+  const correctionRows = (stagingListings as any[]).filter((l:any)=>Array.isArray(l.extracted_data?._warnings) && l.extracted_data._warnings.length>0).map((l:any)=>{
+    const direct = l.matched_listing_id ? canonicalById.get(l.matched_listing_id) : null;
+    const fallbackKey = `${l.matched_building_id ?? ""}|${l.source_page ?? ""}|${l.floor ?? ""}|${l.unit ?? ""}`;
+    const fallback = canonicalByFallback.get(fallbackKey) ?? [];
+    const current = direct ?? (fallback.length===1 ? fallback[0] : null);
+    const d=l.extracted_data ?? {};
+    const numberOrNull=(key:string)=>{const v=extractedValue(d,key); if(v===null||v==="") return null; const n=Number(String(v).replace(/,/g,"")); return Number.isFinite(n)?n:null;};
+    return {
+      stagingListingId:l.id, listingId:current?.id ?? null, buildingName:buildingNameById.get(l.staging_building_id) ?? "이름 없음", floor:l.floor ?? null, page:l.source_page ?? null, reasons:l.extracted_data._warnings.map((x:any)=>String(x)),
+      current: current ? {floor:current.floor??null,unit:current.unit??null,gross_area:current.gross_area===null?null:Number(current.gross_area),gross_area_py:current.gross_area_py===null?null:Number(current.gross_area_py),exclusive_area:current.exclusive_area===null?null:Number(current.exclusive_area),exclusive_area_py:current.exclusive_area_py===null?null:Number(current.exclusive_area_py),deposit_per_py:current.deposit_per_py===null?null:Number(current.deposit_per_py),rent_per_py:current.rent_per_py===null?null:Number(current.rent_per_py),maintenance_per_py:current.maintenance_per_py===null?null:Number(current.maintenance_per_py),noc_per_py:current.noc_per_py===null?null:Number(current.noc_per_py),deposit_total_won:current.deposit_total_won===null?null:Number(current.deposit_total_won),monthly_rent_total_won:current.monthly_rent_total_won===null?null:Number(current.monthly_rent_total_won),management_fee_total_won:current.management_fee_total_won===null?null:Number(current.management_fee_total_won),move_in_text:current.move_in_text??null,status:current.status??null,is_published:current.is_published??null} : null,
+      extracted:{floor:l.floor??null,unit:l.unit??null,gross_area:numberOrNull("gross_area_sqm"),gross_area_py:numberOrNull("gross_area_py"),exclusive_area:numberOrNull("exclusive_area_sqm"),exclusive_area_py:numberOrNull("exclusive_area_py"),deposit_per_py:numberOrNull("deposit_per_py"),rent_per_py:numberOrNull("rent_per_py"),maintenance_per_py:numberOrNull("maintenance_per_py"),noc_per_py:numberOrNull("noc_per_py"),deposit_total_won:numberOrNull("deposit_total_won"),monthly_rent_total_won:numberOrNull("monthly_rent_total_won"),management_fee_total_won:numberOrNull("management_fee_total_won"),move_in_text:String(extractedValue(d,"move_in_text")??"")||null,status:current?.status??"available",is_published:current?.is_published??true},
+      correctionStatus:(correctionByStaging.get(l.id)?.status ?? null) as "PENDING"|"APPLIED"|"VERIFIED_NO_CHANGE"|null, note:correctionByStaging.get(l.id)?.note ?? null,
+    };
+  });
 
   const infoRows: Array<{ id:string; scope:"BUILDING"|"LISTING"; buildingName:string; floor:string|null; page:number|null; reason:string }> = [];
   for (const b of stagingBuildings as any[]) {
@@ -133,6 +166,7 @@ export default async function ImportDetailPage({ params }: { params: Promise<{ i
       </section>}
 
       {(doc.warning_count ?? 0) > 0 && <WarningReviewPanel sourceDocumentId={doc.id} warnings={warningRows} expectedCount={doc.warning_count ?? 0} />}
+      {doc.status === "APPROVED" && correctionRows.length > 0 && <ListingCorrectionReviewPanel sourceDocumentId={doc.id} rows={correctionRows} />}
       {infoRows.length > 0 && <InformationReviewPanel sourceDocumentId={doc.id} infos={infoRows} />}
 
       <section className="border border-silver/25 bg-white p-5"><h2 className="font-medium">처리 결과 요약</h2><dl className="mt-4 grid gap-y-2 text-sm sm:grid-cols-[1fr_1fr_1fr_1fr]"><dt className="text-silver">매칭된 건물</dt><dd>{doc.matched_buildings_count ?? 0}</dd><dt className="text-silver">신규 건물 후보</dt><dd>{doc.new_buildings_count ?? 0}</dd><dt className="text-silver">변경 공실</dt><dd>{doc.changed_listings_count ?? 0}</dd><dt className="text-silver">처리 완료</dt><dd>{doc.processing_completed_at ? formatDateTime(doc.processing_completed_at) : "-"}</dd></dl></section>
