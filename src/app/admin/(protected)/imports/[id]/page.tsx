@@ -91,7 +91,7 @@ export default async function ImportDetailPage({ params }: { params: Promise<{ i
       </div>
 
       <section className="mb-5 border border-silver/25 bg-white p-5">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-medium">원본 자료 정보</h2><p className="mt-1 text-xs text-silver">원본은 비공개 Storage에 보관되며 관리자만 임시 링크로 열람합니다.</p></div><ViewOriginalPdfButton sourceDocumentId={doc.id}/></div>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-medium">원본 자료 정보</h2><p className="mt-1 text-xs text-silver">원본은 비공개 Storage에 보관되며 관리자만 임시 링크로 열람합니다.</p></div><div className="flex flex-wrap items-center gap-2"><ViewOriginalPdfButton sourceDocumentId={doc.id}/>{doc.parser_type === "CBRE" && latestRealRun?.status === "COMPLETED" && <a href={`/admin/imports/${doc.id}/diagnostic-text`} className="border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 hover:bg-amber-100">CBRE 진단 원문 다운로드</a>}</div></div>
         <dl className="grid gap-x-8 gap-y-2 text-sm sm:grid-cols-[140px_1fr_140px_1fr]"><dt className="text-silver">원본 파일명</dt><dd className="break-all">{doc.original_filename}</dd><dt className="text-silver">분석 방식</dt><dd>{doc.parser_type ? PARSER_TYPE_LABEL[doc.parser_type] ?? doc.parser_type : "일반"}</dd><dt className="text-silver">업로드일</dt><dd>{formatDateTime(doc.uploaded_at)}</dd><dt className="text-silver">문서 상태</dt><dd>{SOURCE_DOCUMENT_STATUS_LABEL[doc.status] ?? doc.status}</dd></dl>
       </section>
 

@@ -1,6 +1,6 @@
 import type { ExtractedField, ParsedBuilding, ParsedListing, ParserPage, ParserResult } from "../types";
 
-export const CBRE_PARSER_VERSION = "CBRE-v1.7.0";
+export const CBRE_PARSER_VERSION = "CBRE-v1.8.0";
 
 const f = <T>(value: T | null, raw: string | null, page: number, confidence: number): ExtractedField<T> => ({
   value,
@@ -50,7 +50,27 @@ const FLOOR_RE = /^(?:(?:지상|지하)\s*)?(?:(?:B|P)\d+(?:\s*[~–-]\s*(?:(?:B
 const NUMBER_RE = /@?(\d+(?:,\d{3})*(?:\.\d+)?)/g;
 
 function linesOf(text: string): string[] {
-  return text.split(/\n/).map((x) => x.trim()).filter(Boolean);
+  const raw = text.split(/\n/).map((x) => x.trim()).filter(Boolean);
+  // The production unpdf extractor frequently emits a floor number and its unit
+  // label as two separate text items on their own lines (e.g. "17" then "층", or
+  // "B1" then "F"), instead of a single "17층" item. Every downstream floor-marker
+  // regex (FLOOR_RE and friends) expects the unit attached directly to the number,
+  // so re-join those two-line pairs here, once, centrally, rather than patching
+  // every regex that reads lines. Only an exact bare-number line immediately
+  // followed by an exact bare-unit line is merged, so normal multi-word lines
+  // are never touched.
+  const merged: string[] = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    const cur = raw[i];
+    const nxt = raw[i + 1];
+    if (nxt && /^(?:지상|지하)?\s*(?:B|P)?\d+$/i.test(cur) && /^(?:층|F)$/i.test(nxt)) {
+      merged.push(cur.replace(/\s+/g, "") + nxt);
+      i += 1;
+      continue;
+    }
+    merged.push(cur);
+  }
+  return merged;
 }
 
 function matchingNameFromTitle(title: string): string {
@@ -98,7 +118,14 @@ function isGenericTitleLine(line: string): boolean {
   const lower = line.toLowerCase();
   if (!line || line.length < 2 || line.length > 120) return true;
   if (BAD_TITLE_PARTS.some((x) => lower.includes(x))) return true;
-  if (/^(?:office|for lease|cbre contacts:?|confidential|proprietary|floorplan|floorplans|availabilities|facilities|general information|building image|location map)$/i.test(line)) return true;
+  // unpdf sometimes keeps a leading "|" attached to the item that follows it
+  // (the line is literally "| For Lease" rather than "Office" + "|" + "For Lease"
+  // as three separate items). Strip a leading pipe before testing against the
+  // boilerplate phrase list so "| For Lease" is still recognized as boilerplate
+  // instead of slipping through as a fake building title -- which is exactly what
+  // caused hundreds of pages to collapse into one fake building in production.
+  const strippedLower = lower.replace(/^[|｜]\s*/, "");
+  if (/^(?:office|for lease|office\s*\|\s*for lease|cbre contacts:?|confidential|proprietary|floorplan|floorplans|availabilities|facilities|general information|building image|location map)$/i.test(strippedLower)) return true;
   if (/^[|｜]$/.test(line)) return true;
   if (/^\d+$/.test(line)) return true;
   if (/010[-\s]?\d/.test(line) || /@/.test(line)) return true;
