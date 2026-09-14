@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   approveImportBatch,
+  bulkCreateBuildingsFromStaging,
   classifyImportDiff,
   createBuildingFromStaging,
   generateSemanticStaging,
@@ -33,9 +34,13 @@ export default function ImportReviewControls({
   const router = useRouter();
   const [pending, start] = useTransition();
   const [message, setMessage] = useState<string>("");
+  const [selectedNewIds, setSelectedNewIds] = useState<string[]>([]);
   const unmatchedCount = stagingBuildings.filter((b) => !b.matched_building_id).length;
   const unresolvedRemovalCount = removalRows.filter((r) => !r.resolution).length;
   const canApprove = stagingIsCurrent && stagingBuildings.length > 0 && unmatchedCount === 0 && conflictRows.length === 0 && unresolvedRemovalCount === 0 && unclassifiedCount === 0;
+  const safeNewCandidates = stagingBuildings.filter((b) => !b.matched_building_id && b.match_status === "NEW_CANDIDATE");
+  const reviewCandidates = stagingBuildings.filter((b) => !b.matched_building_id && b.match_status !== "NEW_CANDIDATE");
+  const allSafeSelected = safeNewCandidates.length > 0 && safeNewCandidates.every((b) => selectedNewIds.includes(b.id));
 
   const run = (fn: () => Promise<any>, ok: string) => start(async () => {
     setMessage("");
@@ -74,7 +79,34 @@ export default function ImportReviewControls({
       {stagingBuildings.length > 0 && !canApprove && <div className="border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900"><b>최종 승인 전 확인:</b>{unmatchedCount > 0 ? ` 미매칭 건물 ${unmatchedCount}개.` : ""}{unclassifiedCount > 0 ? ` 미분류 공실 ${unclassifiedCount}개.` : ""}{conflictRows.length > 0 ? ` 충돌 공실 ${conflictRows.length}개.` : ""}{unresolvedRemovalCount > 0 ? ` 종료 여부 미선택 ${unresolvedRemovalCount}개.` : ""}</div>}
       {message && <p role="status" className={`border p-3 text-sm ${message.startsWith("오류:") ? "border-red-200 bg-red-50 text-red-700" : "border-green-200 bg-green-50 text-green-700"}`}>{message}</p>}
 
-      {unmatchedCount > 0 && <div className="border border-amber-200 bg-amber-50 p-4"><p className="text-sm font-medium">건물 연결 확인이 필요합니다.</p><p className="mb-3 mt-1 text-xs text-amber-800">자동으로 확정하지 못한 건물입니다. 기존 건물을 선택하거나 실제 신규 건물이라면 비공개 상태로 먼저 등록하세요.</p><div className="space-y-3">{stagingBuildings.filter((b) => !b.matched_building_id).map((b) => <ManualRow key={b.id} b={b} buildings={buildingOptions} disabled={pending} onMatch={(buildingId) => run(() => setManualBuildingMatch(sourceDocumentId,b.id,buildingId), "기존 건물에 연결했습니다.")} onCreate={() => run(() => createBuildingFromStaging(sourceDocumentId,b.id), "신규 건물을 비공개로 등록하고 연결했습니다.")} />)}</div></div>}
+      {unmatchedCount > 0 && <div className="border border-amber-200 bg-amber-50 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div><p className="text-sm font-medium">건물 연결 확인이 필요합니다.</p><p className="mt-1 text-xs leading-5 text-amber-800">신규 후보는 여러 건을 한 번에 비공개 등록할 수 있습니다. 유사 건물 후보가 있는 ‘확인 필요’ 항목은 중복 방지를 위해 일괄등록 대상에서 제외됩니다.</p></div>
+          <div className="flex gap-2 text-xs"><span className="border border-green-200 bg-green-50 px-2 py-1 text-green-800">안전 신규후보 {safeNewCandidates.length}</span><span className="border border-orange-200 bg-orange-50 px-2 py-1 text-orange-800">확인 필요 {reviewCandidates.length}</span></div>
+        </div>
+
+        {safeNewCandidates.length > 0 && <div className="my-4 border border-green-200 bg-green-50 p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" disabled={pending} onClick={() => setSelectedNewIds(allSafeSelected ? [] : safeNewCandidates.map((b)=>b.id))} className="border border-green-700 bg-white px-3 py-2 text-xs text-green-800 disabled:opacity-40">{allSafeSelected ? "전체 선택 해제" : `안전 신규후보 ${safeNewCandidates.length}개 전체 선택`}</button>
+            <button type="button" disabled={pending || selectedNewIds.length===0} onClick={() => {
+              if (!confirm(`선택한 ${selectedNewIds.length}개 건물을 신규 건물로 비공개 등록할까요?\n등록 직전에 기존 DB와 이름·주소 중복을 다시 검사합니다.`)) return;
+              start(async () => {
+                setMessage("");
+                const r = await bulkCreateBuildingsFromStaging(sourceDocumentId, selectedNewIds);
+                if (r.error) setMessage(`오류: ${r.error}`);
+                else {
+                  setMessage(`신규 건물 일괄등록 완료 · 생성 ${r.created ?? 0}개 · 기존 건물 재연결 ${r.linkedExisting ?? 0}개 · 검토 보류 ${r.skippedReview ?? 0}개 · 실패 ${r.failed ?? 0}개`);
+                  setSelectedNewIds([]);
+                  router.refresh();
+                }
+              });
+            }} className="bg-green-800 px-3 py-2 text-xs text-white disabled:opacity-40">선택 {selectedNewIds.length}개 일괄 신규등록</button>
+            <span className="text-[11px] text-green-800">등록되는 건물은 고객 사이트에 바로 공개되지 않습니다.</span>
+          </div>
+        </div>}
+
+        <div className="space-y-3">{stagingBuildings.filter((b) => !b.matched_building_id).map((b) => <ManualRow key={b.id} b={b} buildings={buildingOptions} disabled={pending} selected={selectedNewIds.includes(b.id)} selectable={b.match_status === "NEW_CANDIDATE"} onSelect={(checked) => setSelectedNewIds((prev)=>checked ? [...new Set([...prev,b.id])] : prev.filter((id)=>id!==b.id))} onMatch={(buildingId) => run(() => setManualBuildingMatch(sourceDocumentId,b.id,buildingId), "기존 건물에 연결했습니다.")} onCreate={() => run(() => createBuildingFromStaging(sourceDocumentId,b.id), "신규 건물을 비공개로 등록하고 연결했습니다.")} />)}</div>
+      </div>}
 
       {conflictRows.length > 0 && <div className="border border-orange-200 bg-orange-50 p-4"><p className="text-sm font-medium">같은 층의 기존 공실이 여러 개 있습니다.</p><p className="mb-3 mt-1 text-xs text-orange-800">신규 공실인지, 기존 공실의 업데이트인지 직접 선택해 주세요.</p><div className="space-y-2">{conflictRows.map((r) => <ConflictRowControl key={r.id} row={r} options={listingOptions.filter((o) => o.building_id === r.matched_building_id)} disabled={pending} onNew={() => run(() => resolveListingConflict(sourceDocumentId,r.id,"AS_NEW"), `${r.floor ?? "공실"}: 신규 공실로 처리했습니다.`)} onMatch={(listingId) => run(() => resolveListingConflict(sourceDocumentId,r.id,"MATCH_EXISTING",listingId), `${r.floor ?? "공실"}: 기존 공실에 연결했습니다.`)} />)}</div></div>}
 
@@ -83,9 +115,16 @@ export default function ImportReviewControls({
   );
 }
 
-function ManualRow({ b, buildings, disabled, onMatch, onCreate }: { b: StagingBuilding; buildings: BuildingOption[]; disabled: boolean; onMatch: (id:string)=>void; onCreate: ()=>void }) {
+function ManualRow({ b, buildings, disabled, selected, selectable, onSelect, onMatch, onCreate }: { b: StagingBuilding; buildings: BuildingOption[]; disabled: boolean; selected: boolean; selectable: boolean; onSelect: (checked:boolean)=>void; onMatch: (id:string)=>void; onCreate: ()=>void }) {
   const [id,setId] = useState("");
-  return <div className="grid items-center gap-2 bg-white p-3 text-sm md:grid-cols-[1.1fr_1fr_auto_auto]"><div><b>{b.raw_building_name ?? "이름 없음"}</b><div className="mt-1 text-xs text-silver">{MATCH_LABEL[b.match_status ?? ""] ?? b.match_status ?? "미매칭"}{b.match_reason ? ` · ${b.match_reason}` : ""}</div></div><select className="border px-2 py-2" value={id} onChange={(e)=>setId(e.target.value)}><option value="">기존 건물 선택</option>{buildings.map((x)=><option key={x.id} value={x.id}>{x.name}</option>)}</select><button disabled={disabled || !id} onClick={()=>onMatch(id)} className="border px-3 py-2 disabled:opacity-40">기존 건물 연결</button><button disabled={disabled} onClick={()=>{if(confirm(`${b.raw_building_name ?? "이 건물"}을 신규 건물로 비공개 등록할까요?`)) onCreate();}} className="bg-navy px-3 py-2 text-white disabled:opacity-40">신규 등록</button></div>;
+  const needsReview = b.match_status === "REVIEW_REQUIRED" || b.match_status === "AMBIGUOUS" || b.match_status === "REVIEW_NEEDED";
+  return <div className={`grid items-center gap-2 bg-white p-3 text-sm md:grid-cols-[auto_1.1fr_1fr_auto_auto] ${needsReview ? "ring-1 ring-orange-200" : ""}`}>
+    <div className="flex items-center justify-center"><input aria-label={`${b.raw_building_name ?? "건물"} 선택`} type="checkbox" checked={selected} disabled={disabled || !selectable} onChange={(e)=>onSelect(e.target.checked)} className="h-4 w-4"/></div>
+    <div><b>{b.raw_building_name ?? "이름 없음"}</b><div className={`mt-1 text-xs ${needsReview ? "text-orange-700" : "text-silver"}`}>{MATCH_LABEL[b.match_status ?? ""] ?? b.match_status ?? "미매칭"}{b.match_reason ? ` · ${b.match_reason}` : ""}</div>{needsReview && <div className="mt-1 text-[10px] text-orange-700">중복 가능성이 있어 일괄 신규등록에서 제외됩니다.</div>}</div>
+    <select className="border px-2 py-2" value={id} onChange={(e)=>setId(e.target.value)}><option value="">기존 건물 선택</option>{buildings.map((x)=><option key={x.id} value={x.id}>{x.name}</option>)}</select>
+    <button disabled={disabled || !id} onClick={()=>onMatch(id)} className="border px-3 py-2 disabled:opacity-40">기존 건물 연결</button>
+    <button disabled={disabled || !selectable} onClick={()=>{if(confirm(`${b.raw_building_name ?? "이 건물"}을 신규 건물로 비공개 등록할까요?`)) onCreate();}} className="bg-navy px-3 py-2 text-white disabled:opacity-40">신규 등록</button>
+  </div>;
 }
 
 function ConflictRowControl({ row, options, disabled, onNew, onMatch }: { row: ConflictRow; options: ListingOption[]; disabled:boolean; onNew:()=>void; onMatch:(id:string)=>void }) {

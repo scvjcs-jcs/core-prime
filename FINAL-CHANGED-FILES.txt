@@ -81,3 +81,8 @@ supabase/migrations/20260913c_step6b2_nai_staging.sql
 supabase/migrations/20260913d_step7_building_matching.sql
 supabase/migrations/20260913e_final_review_publish.sql
 supabase/schema.sql
+
+STEP v1.9 bulk building registration:
+src/components/admin/ImportReviewControls.tsx
+src/app/admin/(protected)/imports/actions.ts
+supabase/migrations/20260914f_bulk_create_staging_buildings.sql

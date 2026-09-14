@@ -607,6 +607,34 @@ export async function approveImportBatch(sourceDocumentId: string): Promise<{ er
   return (data ?? {}) as { inserted?: number; updated?: number; unchanged?: number };
 }
 
+export async function bulkCreateBuildingsFromStaging(
+  sourceDocumentId: string,
+  stagingBuildingIds: string[]
+): Promise<{ error?: string; created?: number; linkedExisting?: number; skippedReview?: number; alreadyMatched?: number; failed?: number }> {
+  const { supabase, admin, error: authError } = await requireAdmin();
+  if (!admin) return { error: authError ?? "관리자 권한이 없는 계정입니다." };
+  const ids = [...new Set(stagingBuildingIds.filter(Boolean))];
+  if (ids.length === 0) return { error: "일괄 등록할 신규 건물을 선택해 주세요." };
+  if (ids.length > 300) return { error: "한 번에 최대 300개까지 처리할 수 있습니다." };
+
+  const { data, error } = await supabase.rpc("bulk_create_buildings_from_staging", {
+    p_source_document_id: sourceDocumentId,
+    p_staging_building_ids: ids,
+  });
+  if (error) return { error: normalizeRpcError(error.message) };
+  const r = (data ?? {}) as Record<string, unknown>;
+  revalidatePath(`/admin/imports/${sourceDocumentId}`);
+  revalidatePath("/admin/imports");
+  revalidatePath("/admin/buildings");
+  return {
+    created: Number(r.created ?? 0),
+    linkedExisting: Number(r.linked_existing ?? 0),
+    skippedReview: Number(r.skipped_review ?? 0),
+    alreadyMatched: Number(r.already_matched ?? 0),
+    failed: Number(r.failed ?? 0),
+  };
+}
+
 export async function createBuildingFromStaging(sourceDocumentId: string, stagingBuildingId: string): Promise<{ error?: string; buildingId?: string }> {
   const { supabase, admin, error: authError } = await requireAdmin();
   if (!admin) return { error: authError ?? "관리자 권한이 없는 계정입니다." };
