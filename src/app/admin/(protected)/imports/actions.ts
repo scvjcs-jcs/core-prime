@@ -546,6 +546,14 @@ export async function generateSemanticStaging(sourceDocumentId: string): Promise
   const version = doc.parser_type === "NAI" ? NAI_PARSER_VERSION : doc.parser_type === "CBRE" ? CBRE_PARSER_VERSION : CW_PARSER_VERSION;
   if (parsed.buildings.length === 0) return { error: `${doc.parser_type} 건물 후보를 찾지 못했습니다. 추출 텍스트를 먼저 확인해 주세요.` };
 
+  const parsedListingCount = parsed.buildings.reduce((sum, b) => sum + b.listings.length, 0);
+  // Large CBRE packages should never silently replace staging with a clearly broken result.
+  // This is deliberately conservative: it catches the observed 367p / 12-listing failure without
+  // assuming an exact market vacancy count for future monthly packages.
+  if (doc.parser_type === "CBRE" && pages.length >= 200 && parsedListingCount < 50) {
+    return { error: `CBRE 구조화 품질검사 실패: ${pages.length}페이지에서 공실 후보가 ${parsedListingCount}건만 감지되었습니다. 기존 Staging은 변경하지 않았습니다.` };
+  }
+
   const payload = parsed.buildings.map((b) => ({
     raw_building_name: b.raw_building_name, normalized_building_name: b.normalized_building_name, primary_source_page: b.primary_source_page,
     extracted_data: { ...b.extracted_data, _warnings: b.warnings, _semantic_parser: version },
@@ -684,7 +692,7 @@ export async function runBuildingMatching(sourceDocumentId: string): Promise<{
     const extractedData = (row.extracted_data ?? {}) as Record<string, unknown>;
     const decision = matchBuilding({
       rawName: row.raw_building_name ?? "",
-      normalizedName: row.normalized_building_name,
+      normalizedName: extractedString(extractedData, "building_name_kr") ?? row.normalized_building_name,
       roadAddress: extractedString(extractedData, "road_address"),
       buildings: (buildingRows ?? []) as ExistingBuildingForMatch[],
       aliases,

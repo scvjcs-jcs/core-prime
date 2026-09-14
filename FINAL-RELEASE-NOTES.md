@@ -41,3 +41,8 @@
 - `node_modules`가 없어 실제 `next build` production build
 
 따라서 최종 운영 반영 시에는 `FINAL-APPLY-GUIDE.md` 순서로 적용 후 Vercel `Ready` 여부를 마지막으로 확인해야 합니다.
+
+## 2026-09-14 CBRE parser hotfix
+- CBRE semantic parser upgraded to `CBRE-v1.2.0` after first production 367-page smoke test.
+- Fixed false building names from contact/body text and low vacancy extraction caused by PDF text-item ordering.
+- Added robust multi-item vacancy row parsing, floor-range preservation, area-ratio validation, and a large-document quality gate.
