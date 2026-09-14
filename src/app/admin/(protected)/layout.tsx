@@ -30,7 +30,7 @@ export default async function ProtectedAdminLayout({
   return (
     <div className="min-h-screen bg-fog">
       <AdminNav name={admin.name} role={admin.role} />
-      <div className="max-w-6xl mx-auto px-6 py-8">{children}</div>
+      <div className="max-w-7xl mx-auto px-4 md:px-6 py-8">{children}</div>
     </div>
   );
 }

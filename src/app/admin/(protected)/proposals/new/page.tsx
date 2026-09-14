@@ -11,7 +11,7 @@ export default async function NewProposalPage({
 
   const [{ data: customers }, { data: buildings }, { data: listings }] = await Promise.all([
     supabase.from("customers").select("id, contact_name, company_name").order("created_at", { ascending: false }),
-    supabase.from("buildings").select("id, name").order("name"),
+    supabase.from("buildings").select("id, name").is("deleted_at", null).order("name"),
     supabase.from("listings").select("id, building_id, floor"),
   ]);
 

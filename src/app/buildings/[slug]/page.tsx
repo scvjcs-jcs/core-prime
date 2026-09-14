@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { LISTING_STATUS_LABEL } from "@/lib/labels";
@@ -11,6 +12,7 @@ async function getBuilding(slug: string) {
     .select("*, districts(id, name, slug)")
     .eq("slug", slug)
     .eq("is_published", true)
+    .is("deleted_at", null)
     .maybeSingle();
 
   if (!building) return null;
@@ -31,7 +33,9 @@ async function getBuilding(slug: string) {
         .select("*")
         .eq("building_id", building.id)
         .eq("is_published", true)
-        .order("created_at", { ascending: false }),
+        .in("status", ["available", "negotiating", "contracting"])
+        .order("status", { ascending: true })
+        .order("exclusive_area_py", { ascending: true }),
     ]);
 
   return {
@@ -92,6 +96,15 @@ export default async function BuildingDetailPage({
 
   const { building, images, transportation, parking, scores, listings } = data;
   const primaryImage = images.find((i) => i.is_primary)?.url ?? images[0]?.url ?? null;
+  const supabase = await createClient();
+  const { data: similarBuildings } = building.district_id ? await supabase
+    .from("buildings")
+    .select("id,name,slug,completion_year,building_grade")
+    .eq("district_id", building.district_id)
+    .eq("is_published", true)
+    .is("deleted_at", null)
+    .neq("id", building.id)
+    .limit(4) : { data: [] as any[] };
 
   // 조회수 기록 — generateMetadata에서 한 번, 이 컴포넌트에서 한 번 getBuilding()이 호출되어
   // 중복 집계될 수 있으므로, 조회 기록은 반드시 이 페이지 컴포넌트에서만 남깁니다.
@@ -102,7 +115,7 @@ export default async function BuildingDetailPage({
     "@type": "RealEstateListing",
     name: building.name,
     address: building.address ?? undefined,
-    url: `https://core-prime-jade.vercel.app/buildings/${building.slug}`,
+    url: `${process.env.NEXT_PUBLIC_SITE_URL ?? "https://core-prime-jade.vercel.app"}/buildings/${building.slug}`,
     image: primaryImage ?? undefined,
   };
 
@@ -187,8 +200,7 @@ export default async function BuildingDetailPage({
             </section>
           )}
 
-          {listings.length > 0 && (
-            <section>
+          <section>
               <h2 className="text-sm tracking-wide text-silver mb-4 border-b border-silver/20 pb-2">
                 임대 매물
               </h2>
@@ -196,14 +208,15 @@ export default async function BuildingDetailPage({
                 {listings.map((l) => (
                   <div key={l.id} className="border border-silver/30 p-4 flex flex-wrap items-center justify-between gap-2 text-sm">
                     <div>
-                      <p className="kr-text">
-                        {l.floor ?? "층 미정"} · {l.exclusive_area ? `전용 ${l.exclusive_area}㎡` : "면적 문의"}
+                      <p className="kr-text font-medium">
+                        {l.floor ?? "층 미정"} · {l.exclusive_area_py ? `전용 ${Number(l.exclusive_area_py).toLocaleString()}평` : l.exclusive_area ? `전용 ${Number(l.exclusive_area).toLocaleString()}㎡` : "면적 문의"}
                       </p>
                       <p className="text-silver text-xs mt-1">
-                        {l.deposit || l.monthly_rent
-                          ? `보증금 ${l.deposit?.toLocaleString() ?? "-"}만원 / 월 ${l.monthly_rent?.toLocaleString() ?? "-"}만원`
-                          : "임대 조건 문의"}
+                        {l.rent_per_py ? `평당 임대료 ${Number(l.rent_per_py).toLocaleString()}원` : l.monthly_rent ? `월 임대료 ${Number(l.monthly_rent).toLocaleString()}만원` : "임대료 문의"}
+                        {l.maintenance_per_py ? ` · 관리비 ${Number(l.maintenance_per_py).toLocaleString()}원/평` : ""}
+                        {l.noc_per_py ? ` · NOC ${Number(l.noc_per_py).toLocaleString()}원/평` : ""}
                       </p>
+                      <p className="text-silver text-xs mt-1">입주 {l.move_in_text ?? l.available_date ?? "협의"}{l.report_date ? ` · 기준 ${l.report_date}` : ""}</p>
                     </div>
                     <span className="text-xs text-navy bg-fog px-2 py-0.5 border border-silver/30">
                       {LISTING_STATUS_LABEL[l.status] ?? l.status}
@@ -212,7 +225,8 @@ export default async function BuildingDetailPage({
                 ))}
               </div>
             </section>
-          )}
+
+          {listings.length === 0 && <section className="border border-silver/30 bg-fog p-6"><p className="text-sm font-medium">현재 공개된 공실이 없습니다.</p><p className="mt-2 text-xs leading-5 text-silver kr-text">임대 자료는 수시로 변경됩니다. 희망 면적과 입주 시기를 남겨주시면 비공개·업데이트 예정 공실까지 함께 확인해 드립니다.</p><Link href={`/advisory?building=${encodeURIComponent(building.name)}`} className="mt-4 inline-block bg-navy px-4 py-2 text-xs text-white">이 건물 공실 문의</Link></section>}
 
           {parking && (
             <section>
@@ -232,7 +246,8 @@ export default async function BuildingDetailPage({
         </div>
 
         <aside>
-          {scores && (
+          {/* Prime Score는 status가 PUBLISHED(공개)일 때만 고객에게 보여줍니다. */}
+          {scores && scores.status === "PUBLISHED" && (
             <div className="bg-navy text-white p-6">
               <p className="text-xs uppercase tracking-[0.2em] text-silver mb-2">Prime Score</p>
               <p className="font-display text-5xl mb-6">{scores.total_score}</p>
@@ -254,15 +269,27 @@ export default async function BuildingDetailPage({
               </div>
             </div>
           )}
+          {(!scores || scores.status !== "PUBLISHED") && (
+            <div className="border border-silver/30 bg-fog p-6">
+              <p className="text-xs uppercase tracking-[0.2em] text-silver mb-2">Prime Score</p>
+              <p className="text-lg font-medium">평가 준비중</p>
+              <p className="text-xs text-silver mt-2">입지·교통·건물품질·주차·편의시설 등을 검토한 뒤 공개됩니다.</p>
+            </div>
+          )}
 
-          <a
-            href={`/advisory?building=${encodeURIComponent(building.name)}`}
-            className="mt-6 block text-center border border-navy text-navy px-6 py-3 text-sm hover:bg-navy hover:text-white transition-colors"
-          >
-            이 건물로 상담 신청
-          </a>
+          <div className="mt-6 border border-silver/30 bg-white p-5"><p className="text-xs text-silver">현재 공개 공실</p><p className="mt-1 text-2xl font-display">{listings.length}건</p>{building.data_last_verified_at && <p className="mt-1 text-[11px] text-silver">건물정보 확인 {new Date(building.data_last_verified_at).toLocaleDateString("ko-KR")}</p>}</div>
+          <Link href={`/advisory?building=${encodeURIComponent(building.name)}`} className="mt-3 block bg-navy px-6 py-3 text-center text-sm text-white transition-colors hover:bg-charcoal">이 건물로 상담 신청</Link>
         </aside>
       </div>
+
+      {similarBuildings && similarBuildings.length > 0 && (
+        <section className="max-w-5xl mx-auto px-6 pb-16">
+          <div className="border-t border-silver/20 pt-8">
+            <div className="flex items-center justify-between mb-4"><h2 className="font-display text-xl">비슷한 권역의 오피스</h2><Link href={`/buildings?district=${building.districts?.slug ?? ""}`} className="text-xs text-navy hover:underline">같은 권역 전체보기 →</Link></div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">{similarBuildings.map((b:any)=><Link key={b.id} href={`/buildings/${b.slug}`} className="border border-silver/30 p-4 hover:border-navy"><p className="font-medium">{b.name}</p><p className="text-xs text-silver mt-1">{b.building_grade ?? "등급 미정"} · {b.completion_year ? `${b.completion_year}년` : "준공연도 미정"}</p></Link>)}</div>
+          </div>
+        </section>
+      )}
     </main>
   );
 }

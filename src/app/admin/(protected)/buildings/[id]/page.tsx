@@ -85,13 +85,14 @@ export default async function EditBuildingPage({
       description: parking?.description ?? "",
     },
     scores: {
-      location_score: scores?.location_score ?? 0,
-      transportation_score: scores?.transportation_score ?? 0,
-      building_quality_score: scores?.building_quality_score ?? 0,
-      parking_score: scores?.parking_score ?? 0,
-      amenities_score: scores?.amenities_score ?? 0,
-      corporate_image_score: scores?.corporate_image_score ?? 0,
-      employee_access_score: scores?.employee_access_score ?? 0,
+      location_score: scores?.location_score ?? null,
+      transportation_score: scores?.transportation_score ?? null,
+      building_quality_score: scores?.building_quality_score ?? null,
+      parking_score: scores?.parking_score ?? null,
+      amenities_score: scores?.amenities_score ?? null,
+      corporate_image_score: scores?.corporate_image_score ?? null,
+      employee_access_score: scores?.employee_access_score ?? null,
+      status: scores?.status ?? "NOT_EVALUATED",
     },
     publish: {
       status: building.status ?? "active",
@@ -112,6 +113,7 @@ export default async function EditBuildingPage({
         initial={initial}
         initialImages={images ?? []}
         initialContents={contents ?? []}
+        initialDataVerifiedAt={building.data_last_verified_at}
       />
     </div>
   );

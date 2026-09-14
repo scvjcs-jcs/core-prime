@@ -5,11 +5,12 @@ import { useRouter } from "next/navigation";
 import {
   createBuilding,
   updateBuilding,
+  markBuildingVerifiedNow,
   type BuildingFormPayload,
 } from "@/app/admin/(protected)/buildings/actions";
 import ImageUploader from "./ImageUploader";
 import AIContentPanel from "./AIContentPanel";
-import type { BuildingContent, BuildingImage } from "@/lib/types";
+import type { BuildingContent, BuildingImage, BuildingScoreStatus } from "@/lib/types";
 
 const TABS = [
   "기본정보",
@@ -64,13 +65,15 @@ function emptyPayload(): BuildingFormPayload {
       description: "",
     },
     scores: {
-      location_score: 0,
-      transportation_score: 0,
-      building_quality_score: 0,
-      parking_score: 0,
-      amenities_score: 0,
-      corporate_image_score: 0,
-      employee_access_score: 0,
+      // 미입력 = NULL (0점과 다른 의미입니다)
+      location_score: null,
+      transportation_score: null,
+      building_quality_score: null,
+      parking_score: null,
+      amenities_score: null,
+      corporate_image_score: null,
+      employee_access_score: null,
+      status: "NOT_EVALUATED",
     },
     publish: {
       status: "active",
@@ -95,6 +98,7 @@ export default function BuildingForm({
   initial,
   initialImages,
   initialContents,
+  initialDataVerifiedAt,
 }: {
   mode: "create" | "edit";
   buildingId?: string;
@@ -102,12 +106,27 @@ export default function BuildingForm({
   initial?: BuildingFormPayload;
   initialImages?: BuildingImage[];
   initialContents?: BuildingContent[];
+  initialDataVerifiedAt?: string | null;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState(0);
   const [form, setForm] = useState<BuildingFormPayload>(initial ?? emptyPayload());
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [verifiedAt, setVerifiedAt] = useState<string | null>(initialDataVerifiedAt ?? null);
+  const [verifying, setVerifying] = useState(false);
+
+  async function handleMarkVerified() {
+    if (!buildingId) return;
+    setVerifying(true);
+    const result = await markBuildingVerifiedNow(buildingId);
+    setVerifying(false);
+    if (result.error) {
+      window.alert(`처리 실패: ${result.error}`);
+      return;
+    }
+    setVerifiedAt(result.verifiedAt ?? new Date().toISOString());
+  }
 
   function update<K extends keyof BuildingFormPayload>(
     section: K,
@@ -625,41 +644,99 @@ export default function BuildingForm({
 
         {tab === 6 && (
           <div>
-            <p className="text-sm text-silver mb-4">
-              각 항목을 0~100점으로 입력하면 총점(Total Score)은 자동으로 계산됩니다.
-            </p>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-              {(
-                [
-                  ["location_score", "입지(Location)"],
-                  ["transportation_score", "교통(Transportation)"],
-                  ["building_quality_score", "건물 품질(Building Quality)"],
-                  ["parking_score", "주차(Parking)"],
-                  ["amenities_score", "편의시설(Amenities)"],
-                  ["corporate_image_score", "기업 이미지(Corporate Image)"],
-                  ["employee_access_score", "직원 접근성(Employee Accessibility)"],
-                ] as const
-              ).map(([key, label]) => (
-                <div key={key}>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs text-silver">{label}</label>
-                    <span className="text-sm font-display">{form.scores[key]}</span>
+            {(() => {
+              const SCORE_KEYS = [
+                "location_score",
+                "transportation_score",
+                "building_quality_score",
+                "parking_score",
+                "amenities_score",
+                "corporate_image_score",
+                "employee_access_score",
+              ] as const;
+              const allScored = SCORE_KEYS.every((k) => form.scores[k] !== null);
+              return (
+                <>
+                  <div className="mb-6">
+                    <label className={labelCls}>공개 상태</label>
+                    <select
+                      className={inputCls + " max-w-sm"}
+                      value={form.scores.status}
+                      onChange={(e) =>
+                        update("scores", { status: e.target.value as BuildingScoreStatus })
+                      }
+                    >
+                      <option value="NOT_EVALUATED">평가 전 (고객에게 보이지 않음)</option>
+                      <option value="DRAFT">초안 (관리자만 확인, 고객에게 보이지 않음)</option>
+                      <option value="PUBLISHED" disabled={!allScored}>
+                        공개 (고객에게 Prime Score 노출)
+                      </option>
+                    </select>
+                    {!allScored && (
+                      <p className="text-xs text-amber-600 mt-1.5">
+                        7개 세부 점수를 모두 입력해야 &apos;공개&apos;로 설정할 수 있습니다.
+                      </p>
+                    )}
                   </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={form.scores[key]}
-                    onChange={(e) =>
-                      update("scores", { [key]: Number(e.target.value) } as Partial<
-                        BuildingFormPayload["scores"]
-                      >)
-                    }
-                    className="w-full"
-                  />
-                </div>
-              ))}
-            </div>
+
+                  <p className="text-sm text-silver mb-4">
+                    각 항목을 0~100점으로 입력하세요. 체크하지 않으면 &apos;미입력&apos;(NULL)으로
+                    저장되며, 총점(Total Score)은 미입력 항목이 하나라도 있으면 자동으로 빈 값이
+                    됩니다.
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                    {(
+                      [
+                        ["location_score", "입지(Location)"],
+                        ["transportation_score", "교통(Transportation)"],
+                        ["building_quality_score", "건물 품질(Building Quality)"],
+                        ["parking_score", "주차(Parking)"],
+                        ["amenities_score", "편의시설(Amenities)"],
+                        ["corporate_image_score", "기업 이미지(Corporate Image)"],
+                        ["employee_access_score", "직원 접근성(Employee Accessibility)"],
+                      ] as const
+                    ).map(([key, label]) => {
+                      const value = form.scores[key];
+                      const hasValue = value !== null;
+                      return (
+                        <div key={key}>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-xs text-silver flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={hasValue}
+                                onChange={(e) =>
+                                  update("scores", {
+                                    [key]: e.target.checked ? 50 : null,
+                                  } as Partial<BuildingFormPayload["scores"]>)
+                                }
+                              />
+                              {label}
+                            </label>
+                            <span className="text-sm font-display">
+                              {hasValue ? value : "미입력"}
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            value={value ?? 0}
+                            disabled={!hasValue}
+                            onChange={(e) =>
+                              update("scores", {
+                                [key]: Number(e.target.value),
+                              } as Partial<BuildingFormPayload["scores"]>)
+                            }
+                            className="w-full disabled:opacity-30"
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              );
+            })()}
           </div>
         )}
 
@@ -711,6 +788,28 @@ export default function BuildingForm({
                 value={form.publish.meta_description}
                 onChange={(e) => update("publish", { meta_description: e.target.value })}
               />
+            </div>
+            <div className="md:col-span-2 border-t border-silver/20 pt-4 flex items-center justify-between flex-wrap gap-3">
+              <div className="text-sm">
+                <span className="text-silver">정보 최종 확인일: </span>
+                <span>
+                  {verifiedAt ? new Date(verifiedAt).toLocaleString("ko-KR") : "확인 기록 없음"}
+                </span>
+              </div>
+              {mode === "edit" && buildingId ? (
+                <button
+                  type="button"
+                  onClick={handleMarkVerified}
+                  disabled={verifying}
+                  className="text-xs text-navy border border-navy px-3 py-1.5 hover:bg-navy hover:text-white transition-colors disabled:opacity-50"
+                >
+                  {verifying ? "처리 중..." : "오늘 날짜로 확인 완료"}
+                </button>
+              ) : (
+                <p className="text-xs text-silver">
+                  건물을 먼저 등록한 뒤 확인 완료 처리를 할 수 있습니다.
+                </p>
+              )}
             </div>
           </div>
         )}

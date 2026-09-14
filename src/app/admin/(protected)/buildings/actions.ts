@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import type { BuildingParking, BuildingScores, BuildingTransportation } from "@/lib/types";
+import { normalizeBuildingName } from "@/lib/normalizeBuildingName";
 
 export type BuildingFormPayload = {
   basic: {
@@ -74,9 +75,31 @@ function sanitizeManualSlug(input: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+// Prime Score를 '공개(PUBLISHED)'로 설정하려면 7개 세부 점수가 모두 입력되어 있어야 합니다.
+// (일부만 입력된 상태로 고객에게 노출되는 것을 막기 위한 검증입니다.)
+function validateScoresForPublish(scores: BuildingFormPayload["scores"]): string | null {
+  if (scores.status !== "PUBLISHED") return null;
+  const required = [
+    scores.location_score,
+    scores.transportation_score,
+    scores.building_quality_score,
+    scores.parking_score,
+    scores.amenities_score,
+    scores.corporate_image_score,
+    scores.employee_access_score,
+  ];
+  if (required.some((v) => v === null || v === undefined)) {
+    return "Prime Score를 '공개'로 설정하려면 [Prime Score] 탭의 7개 세부 점수를 모두 입력해야 합니다.";
+  }
+  return null;
+}
+
 export async function createBuilding(
   payload: BuildingFormPayload
 ): Promise<{ error?: string; id?: string }> {
+  const scoreError = validateScoresForPublish(payload.scores);
+  if (scoreError) return { error: scoreError };
+
   const supabase = await createClient();
 
   const manualSlug = sanitizeManualSlug(payload.basic.slug ?? "");
@@ -91,6 +114,8 @@ export async function createBuilding(
       building_code: payload.basic.building_code || null,
       district_id: payload.basic.district_id || null,
       slug,
+      // 건물명 기반 정규화 이름 — 나중에 PDF Import가 같은 건물인지 매칭할 때 사용합니다.
+      normalized_name: normalizeBuildingName(payload.basic.name),
       completion_year: payload.info.completion_year,
       basement_floors: payload.info.basement_floors,
       above_ground_floors: payload.info.above_ground_floors,
@@ -110,7 +135,9 @@ export async function createBuilding(
       postal_code: payload.location.postal_code || null,
       latitude: payload.location.latitude,
       longitude: payload.location.longitude,
-      parking_total: payload.parking.total_spaces,
+      // 주차 대수는 building_parking.total_spaces가 기준값(source of truth)입니다.
+      // buildings.parking_total 컬럼은 중복 저장을 막기 위해 더 이상 여기서 쓰지 않습니다
+      // (컬럼 자체는 남겨두되, 제거 여부는 추후 별도 검토).
       status: payload.publish.status || "active",
       is_published: payload.publish.is_published,
       is_featured: payload.publish.is_featured,
@@ -135,6 +162,9 @@ export async function updateBuilding(
   id: string,
   payload: BuildingFormPayload
 ): Promise<{ error?: string }> {
+  const scoreError = validateScoresForPublish(payload.scores);
+  if (scoreError) return { error: scoreError };
+
   const supabase = await createClient();
 
   const { error } = await supabase
@@ -146,6 +176,7 @@ export async function updateBuilding(
       building_code: payload.basic.building_code || null,
       district_id: payload.basic.district_id || null,
       slug: sanitizeManualSlug(payload.basic.slug ?? "") || undefined,
+      normalized_name: normalizeBuildingName(payload.basic.name),
       completion_year: payload.info.completion_year,
       basement_floors: payload.info.basement_floors,
       above_ground_floors: payload.info.above_ground_floors,
@@ -165,7 +196,7 @@ export async function updateBuilding(
       postal_code: payload.location.postal_code || null,
       latitude: payload.location.latitude,
       longitude: payload.location.longitude,
-      parking_total: payload.parking.total_spaces,
+      // buildings.parking_total은 더 이상 여기서 갱신하지 않습니다 (주차 대수 기준값 = building_parking.total_spaces).
       status: payload.publish.status || "active",
       is_published: payload.publish.is_published,
       is_featured: payload.publish.is_featured,
@@ -207,7 +238,8 @@ async function saveRelatedTables(payload: BuildingFormPayload, buildingId: strin
     { onConflict: "building_id" }
   );
 
-  // Prime Score upsert (total_score는 DB 트리거가 자동 계산)
+  // Prime Score upsert (total_score는 DB 트리거가 자동 계산 — 세부 점수 중 하나라도 NULL이면
+  // total_score도 자동으로 NULL이 됩니다. 여기서 NULL을 그대로 넘기는 것이 "미입력" 의미입니다.)
   await supabase.from("building_scores").upsert(
     {
       building_id: buildingId,
@@ -218,6 +250,7 @@ async function saveRelatedTables(payload: BuildingFormPayload, buildingId: strin
       amenities_score: payload.scores.amenities_score,
       corporate_image_score: payload.scores.corporate_image_score,
       employee_access_score: payload.scores.employee_access_score,
+      status: payload.scores.status,
     },
     { onConflict: "building_id" }
   );
@@ -239,13 +272,50 @@ async function saveRelatedTables(payload: BuildingFormPayload, buildingId: strin
   }
 }
 
+// 건물 삭제 = Soft Delete(보관). 실제 DELETE는 하지 않습니다.
+// 연결된 매물/사진/Prime Score/제안서 기록이 함께 사라지는 것을 막기 위한 조치입니다.
 export async function deleteBuilding(id: string): Promise<{ error?: string }> {
   const supabase = await createClient();
-  const { error } = await supabase.from("buildings").delete().eq("id", id);
+  const { error } = await supabase
+    .from("buildings")
+    .update({ deleted_at: new Date().toISOString(), is_published: false })
+    .eq("id", id);
   if (error) {
     return { error: error.message };
   }
   revalidatePath("/admin/buildings");
   revalidatePath("/admin");
   return {};
+}
+
+// 삭제(보관)된 건물을 복구합니다. 홈페이지 공개 여부(is_published)는 복구 시 자동으로
+// 다시 켜지 않습니다 — 관리자가 확인 후 직접 공개 여부를 정하도록 합니다.
+export async function restoreBuilding(id: string): Promise<{ error?: string }> {
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("buildings")
+    .update({ deleted_at: null })
+    .eq("id", id);
+  if (error) {
+    return { error: error.message };
+  }
+  revalidatePath("/admin/buildings");
+  revalidatePath("/admin");
+  return {};
+}
+
+// "오늘 날짜로 확인 완료" — 관리자가 건물 정보를 직접 눈으로 확인했다는 시각을 남깁니다.
+// 나중에 PDF Import가 들어오면 이 값은 자동으로 갱신됩니다.
+export async function markBuildingVerifiedNow(id: string): Promise<{ error?: string; verifiedAt?: string }> {
+  const supabase = await createClient();
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from("buildings")
+    .update({ data_last_verified_at: now })
+    .eq("id", id);
+  if (error) {
+    return { error: error.message };
+  }
+  revalidatePath(`/admin/buildings/${id}`);
+  return { verifiedAt: now };
 }

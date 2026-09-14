@@ -22,3 +22,18 @@ body {
 .font-display {
   font-family: var(--font-newsreader), "Newsreader", serif;
 }
+
+* { box-sizing: border-box; }
+
+::selection { background: #13233f; color: #ffffff; }
+
+:focus-visible {
+  outline: 2px solid #13233f;
+  outline-offset: 2px;
+}
+
+button, a, input, select, textarea { border-radius: 2px; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+
+.tabular-nums { font-variant-numeric: tabular-nums; }

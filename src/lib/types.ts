@@ -57,6 +57,10 @@ export type Building = {
   meta_description: string | null;
   created_at: string;
   updated_at: string;
+  normalized_name: string | null;
+  data_last_verified_at: string | null;
+  // 소프트 삭제(보관) 시각. NULL이면 정상, 값이 있으면 삭제(보관)됨 — 실제 DELETE는 하지 않음.
+  deleted_at: string | null;
 };
 
 export type BuildingTransportation = {
@@ -83,16 +87,22 @@ export type BuildingParking = {
   description: string | null;
 };
 
+// Prime Score 공개 상태 — building_scores.status 단일 기준.
+// NOT_EVALUATED(평가 전, 고객 비노출) / DRAFT(초안, 관리자만) / PUBLISHED(공개, 고객 노출)
+export type BuildingScoreStatus = "NOT_EVALUATED" | "DRAFT" | "PUBLISHED";
+
 export type BuildingScores = {
   building_id?: string;
-  location_score: number;
-  transportation_score: number;
-  building_quality_score: number;
-  parking_score: number;
-  amenities_score: number;
-  corporate_image_score: number;
-  employee_access_score: number;
-  total_score?: number;
+  // 세부 점수는 입력하지 않으면 NULL("미입력")입니다. 0점과 "미입력"은 다른 의미입니다.
+  location_score: number | null;
+  transportation_score: number | null;
+  building_quality_score: number | null;
+  parking_score: number | null;
+  amenities_score: number | null;
+  corporate_image_score: number | null;
+  employee_access_score: number | null;
+  total_score?: number | null;
+  status: BuildingScoreStatus;
 };
 
 export type BuildingImageType =
@@ -169,22 +179,33 @@ export type ListingStatus =
   | "contracting"
   | "leased"
   | "hold"
-  | "hidden";
+  | "hidden"
+  | "expired";
 
 export type Listing = {
   id: string;
   listing_code: string | null;
   building_id: string;
   floor: string | null;
+  unit: string | null;
   gross_area: number | null;
+  gross_area_py: number | null;
   exclusive_area: number | null;
+  exclusive_area_py: number | null;
   efficiency_ratio: number | null;
   deposit: number | null;
+  deposit_per_py: number | null;
   monthly_rent: number | null;
+  rent_per_py: number | null;
   management_fee: number | null;
+  maintenance_per_py: number | null;
+  noc_per_py: number | null;
   parking_spaces: number | null;
   additional_parking_fee: number | null;
   available_date: string | null;
+  move_in_text: string | null;
+  rent_free: string | null;
+  fit_out_period: string | null;
   lease_term_months: number | null;
   interior_status: string | null;
   restoration_required: boolean;
@@ -192,6 +213,12 @@ export type Listing = {
   description: string | null;
   is_featured: boolean;
   is_published: boolean;
+  // 출처/검증 — Import(PDF 자동 입력)가 채우는 필드. source_id가 NULL이면 관리자 수동 입력입니다.
+  source_id: string | null;
+  source_document_id: string | null;
+  source_page: number | null;
+  report_date: string | null;
+  verified_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -268,6 +295,117 @@ export type BuildingContent = {
   content_type: ContentType;
   body: string | null;
   status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+// ===== Phase 6 STEP 5: 자료 가져오기(Import) — 업로드/등록 관리 =====
+// 주의: 이번 STEP은 "PDF를 안전하게 등록하고 관리"하는 화면까지만입니다.
+// PDF 내용 분석/파싱/staging 적재는 STEP 6 이후입니다.
+
+// DB의 sources_type_check 제약조건과 반드시 일치해야 합니다.
+export type SourceType = "BROKER" | "OWNER_DIRECT" | "CORE_PRIME_DIRECT" | "OTHER";
+
+export type Source = {
+  id: string;
+  name: string;
+  code: string;
+  type: SourceType;
+  priority: number;
+  is_active: boolean;
+};
+
+// DB의 source_documents_status_check 제약조건과 반드시 일치해야 합니다.
+export type SourceDocumentStatus =
+  | "UPLOADED"
+  | "QUEUED"
+  | "PROCESSING"
+  | "PARSED"
+  | "REVIEW_REQUIRED"
+  | "APPROVED"
+  | "FAILED";
+
+// DB의 source_documents_parser_type_check 제약조건과 반드시 일치해야 합니다.
+// NULL = 아직 파서 타입을 지정하지 않음.
+export type ParserType = "CBRE" | "CW" | "NAI" | "GENERIC";
+
+export type SourceDocument = {
+  id: string;
+  source_id: string;
+  title: string;
+  original_filename: string;
+  storage_path: string | null;
+  report_date: string;
+  page_count: number | null;
+  status: SourceDocumentStatus;
+  current_page: number | null;
+  processed_pages: number | null;
+  error_message: string | null;
+  total_buildings_detected: number | null;
+  total_listings_detected: number | null;
+  new_buildings_count: number | null;
+  matched_buildings_count: number | null;
+  changed_listings_count: number | null;
+  warning_count: number | null;
+  parser_type: ParserType | null;
+  parser_version: string | null;
+  uploaded_by: string | null;
+  uploaded_at: string;
+  processing_started_at: string | null;
+  processing_completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+// ===== Phase 6 STEP 6A: Parsing State Machine =====
+// 실제 PDF 파싱 전, 문서별 분석 실행(run)과 페이지 처리 상태를 추적합니다.
+export type ParsingRunStatus =
+  | "QUEUED"
+  | "PROCESSING"
+  | "COMPLETED"
+  | "COMPLETED_WITH_WARNINGS"
+  | "FAILED"
+  | "CANCELLED";
+
+export type ParsingRun = {
+  id: string;
+  source_document_id: string;
+  parser_type: ParserType;
+  parser_version: string;
+  status: ParsingRunStatus;
+  started_at: string | null;
+  completed_at: string | null;
+  current_page: number;
+  processed_pages: number;
+  error_page_count: number;
+  total_pages: number | null;
+  context_state: Record<string, unknown>;
+  error_message: string | null;
+  triggered_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SourceDocumentPageStatus =
+  | "PENDING"
+  | "PROCESSING"
+  | "DONE"
+  | "FAILED"
+  | "SKIPPED";
+
+export type SourceDocumentPage = {
+  id: string;
+  parsing_run_id: string;
+  source_document_id: string;
+  page_number: number;
+  status: SourceDocumentPageStatus;
+  attempt_count: number;
+  extracted_text: string | null;
+  error_message: string | null;
+  warnings: unknown[];
+  context_before: Record<string, unknown> | null;
+  context_after: Record<string, unknown> | null;
+  processed_at: string | null;
   created_at: string;
   updated_at: string;
 };
