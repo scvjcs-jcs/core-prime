@@ -533,18 +533,27 @@ export async function generateSemanticStaging(sourceDocumentId: string): Promise
   if (!doc || !doc.parser_type || !["NAI", "CBRE", "CW"].includes(doc.parser_type)) {
     return { error: "NAI, CBRE, C&W 문서만 현재 semantic parser를 지원합니다." };
   }
-  const { data: run } = await supabase.from("parsing_runs").select("id,status,parser_version,parser_type")
-    .eq("source_document_id", sourceDocumentId).eq("parser_version", "TEXT-EXTRACT-v1.0.0")
+  const { data: run } = await supabase.from("parsing_runs").select("id,status,parser_version,parser_type,total_pages,processed_pages")
+    .eq("source_document_id", sourceDocumentId)
+    .eq("parser_version", "TEXT-EXTRACT-v1.0.0")
+    .eq("parser_type", doc.parser_type)
     .order("created_at", { ascending: false }).limit(1).maybeSingle();
-  if (!run || run.status !== "COMPLETED") return { error: "완료된 PDF Text Extraction Run이 필요합니다." };
+  if (!run || run.status !== "COMPLETED") return { error: `완료된 ${doc.parser_type} PDF Text Extraction Run이 필요합니다.` };
 
   const { data: pageRows, error: pageError } = await supabase.from("source_document_pages")
     .select("page_number,extracted_text,status").eq("parsing_run_id", run.id).eq("status", "DONE").order("page_number");
   if (pageError) return { error: pageError.message };
   const pages = (pageRows ?? []).map((p) => ({ page_number: p.page_number, extracted_text: p.extracted_text }));
+  if (pages.length === 0) return { error: "저장된 PDF 원문 페이지가 없습니다. 원문 추출 결과를 확인해 주세요." };
+  if (run.total_pages && pages.length < run.total_pages) return { error: `원문 추출이 완전하지 않습니다. ${pages.length}/${run.total_pages}페이지만 DONE 상태입니다.` };
+
   const parsed = doc.parser_type === "NAI" ? parseNAIPages(pages) : doc.parser_type === "CBRE" ? parseCBREPages(pages) : parseCWPages(pages);
   const version = doc.parser_type === "NAI" ? NAI_PARSER_VERSION : doc.parser_type === "CBRE" ? CBRE_PARSER_VERSION : CW_PARSER_VERSION;
-  if (parsed.buildings.length === 0) return { error: `${doc.parser_type} 건물 후보를 찾지 못했습니다. 추출 텍스트를 먼저 확인해 주세요.` };
+  if (parsed.buildings.length === 0) {
+    const leasePages = pages.filter((p) => /Office\s*\|\s*For Lease/i.test(p.extracted_text ?? "")).length;
+    const samplePages = pages.filter((p) => (p.extracted_text ?? "").trim()).slice(0, 3).map((p) => p.page_number).join(", ");
+    return { error: `${doc.parser_type} 건물 후보를 찾지 못했습니다. 원문 ${pages.length}페이지 중 Office | For Lease 감지 ${leasePages}페이지입니다. 텍스트가 있는 예시 페이지: ${samplePages || "없음"}. 기존 Staging은 유지되었습니다.` };
+  }
 
   const parsedListingCount = parsed.buildings.reduce((sum, b) => sum + b.listings.length, 0);
   // Large CBRE packages should never silently replace staging with a clearly broken result.

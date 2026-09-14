@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import {
   approveImportBatch,
   classifyImportDiff,
@@ -24,27 +25,29 @@ const MATCH_LABEL: Record<string,string> = {
 };
 
 export default function ImportReviewControls({
-  sourceDocumentId, parserType, canParse, stagingBuildings, buildingOptions, removalRows, conflictRows, listingOptions, unclassifiedCount,
+  sourceDocumentId, parserType, canParse, stagingBuildings, buildingOptions, removalRows, conflictRows, listingOptions, unclassifiedCount, stagingIsCurrent = true,
 }: {
   sourceDocumentId: string; parserType: string | null; canParse: boolean; stagingBuildings: StagingBuilding[]; buildingOptions: BuildingOption[];
-  removalRows: RemovalRow[]; conflictRows: ConflictRow[]; listingOptions: ListingOption[]; unclassifiedCount: number;
+  removalRows: RemovalRow[]; conflictRows: ConflictRow[]; listingOptions: ListingOption[]; unclassifiedCount: number; stagingIsCurrent?: boolean;
 }) {
+  const router = useRouter();
   const [pending, start] = useTransition();
   const [message, setMessage] = useState<string>("");
   const unmatchedCount = stagingBuildings.filter((b) => !b.matched_building_id).length;
   const unresolvedRemovalCount = removalRows.filter((r) => !r.resolution).length;
-  const canApprove = stagingBuildings.length > 0 && unmatchedCount === 0 && conflictRows.length === 0 && unresolvedRemovalCount === 0 && unclassifiedCount === 0;
+  const canApprove = stagingIsCurrent && stagingBuildings.length > 0 && unmatchedCount === 0 && conflictRows.length === 0 && unresolvedRemovalCount === 0 && unclassifiedCount === 0;
 
   const run = (fn: () => Promise<any>, ok: string) => start(async () => {
     setMessage("");
     const r = await fn();
     setMessage(r?.error ? `오류: ${r.error}` : ok);
+    if (!r?.error) router.refresh();
   });
 
   const steps = [
-    { no: 1, title: "자료 구조화", done: stagingBuildings.length > 0, desc: "PDF 원문에서 건물·공실 후보 생성" },
-    { no: 2, title: "건물 매칭", done: stagingBuildings.length > 0 && unmatchedCount === 0, desc: "기존 DB 또는 신규 건물 연결" },
-    { no: 3, title: "변경 검수", done: stagingBuildings.length > 0 && unclassifiedCount === 0 && conflictRows.length === 0 && unresolvedRemovalCount === 0, desc: "신규·변경·종료 가능 공실 확인" },
+    { no: 1, title: "자료 구조화", done: stagingIsCurrent && stagingBuildings.length > 0, desc: "PDF 원문에서 건물·공실 후보 생성" },
+    { no: 2, title: "건물 매칭", done: stagingIsCurrent && stagingBuildings.length > 0 && unmatchedCount === 0, desc: "기존 DB 또는 신규 건물 연결" },
+    { no: 3, title: "변경 검수", done: stagingIsCurrent && stagingBuildings.length > 0 && unclassifiedCount === 0 && conflictRows.length === 0 && unresolvedRemovalCount === 0, desc: "신규·변경·종료 가능 공실 확인" },
     { no: 4, title: "승인 반영", done: false, desc: "검수 결과를 실제 DB에 반영" },
   ];
 
@@ -59,13 +62,15 @@ export default function ImportReviewControls({
           setMessage("");
           const r = await generateSemanticStaging(sourceDocumentId);
           setMessage(r?.error ? `오류: ${r.error}` : `1단계 자료 구조화 완료 · 건물 ${r.buildings ?? 0}개 · 공실 ${r.listings ?? 0}개 · 경고 ${r.warnings ?? 0}개`);
+          if (!r?.error) router.refresh();
         })} className="bg-navy px-4 py-2 text-sm text-white disabled:opacity-40">1. 건물·공실 후보 만들기</button>
-        <button disabled={pending || stagingBuildings.length === 0} onClick={() => run(() => runBuildingMatching(sourceDocumentId), "2단계 건물 자동매칭이 완료되었습니다.")} className="border border-navy px-4 py-2 text-sm text-navy disabled:opacity-40">2. 기존 건물 자동매칭</button>
-        <button disabled={pending || stagingBuildings.length === 0 || unmatchedCount > 0} onClick={() => run(() => classifyImportDiff(sourceDocumentId), "3단계 공실 변경사항 분류가 완료되었습니다.")} className="border border-navy px-4 py-2 text-sm text-navy disabled:opacity-40">3. 공실 변경사항 계산</button>
+        <button disabled={pending || !stagingIsCurrent || stagingBuildings.length === 0} onClick={() => run(() => runBuildingMatching(sourceDocumentId), "2단계 건물 자동매칭이 완료되었습니다.")} className="border border-navy px-4 py-2 text-sm text-navy disabled:opacity-40">2. 기존 건물 자동매칭</button>
+        <button disabled={pending || !stagingIsCurrent || stagingBuildings.length === 0 || unmatchedCount > 0} onClick={() => run(() => classifyImportDiff(sourceDocumentId), "3단계 공실 변경사항 분류가 완료되었습니다.")} className="border border-navy px-4 py-2 text-sm text-navy disabled:opacity-40">3. 공실 변경사항 계산</button>
         <button disabled={pending || !canApprove} onClick={() => { if (confirm("검수 결과를 실제 건물·공실 DB에 반영할까요? 승인 후 고객 화면에 영향을 줄 수 있습니다.")) run(() => approveImportBatch(sourceDocumentId), "4단계 승인·반영이 완료되었습니다."); }} className="bg-charcoal px-4 py-2 text-sm text-white disabled:opacity-35">4. 최종 승인·반영</button>
       </div>
 
       {!canParse && <p className="border border-silver/25 bg-fog p-3 text-xs text-silver">먼저 위의 PDF 원문 추출을 완료해야 자료 구조화를 시작할 수 있습니다.</p>}
+      {!stagingIsCurrent && stagingBuildings.length > 0 && <p className="border border-red-200 bg-red-50 p-3 text-xs leading-5 text-red-700"><b>이전 Parser 결과가 화면에 남아 있습니다.</b> 1단계 ‘건물·공실 후보 만들기’를 다시 실행해 현재 Parser 결과로 교체하기 전에는 2~4단계를 진행할 수 없습니다.</p>}
       {stagingBuildings.length > 0 && !canApprove && <div className="border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900"><b>최종 승인 전 확인:</b>{unmatchedCount > 0 ? ` 미매칭 건물 ${unmatchedCount}개.` : ""}{unclassifiedCount > 0 ? ` 미분류 공실 ${unclassifiedCount}개.` : ""}{conflictRows.length > 0 ? ` 충돌 공실 ${conflictRows.length}개.` : ""}{unresolvedRemovalCount > 0 ? ` 종료 여부 미선택 ${unresolvedRemovalCount}개.` : ""}</div>}
       {message && <p role="status" className={`border p-3 text-sm ${message.startsWith("오류:") ? "border-red-200 bg-red-50 text-red-700" : "border-green-200 bg-green-50 text-green-700"}`}>{message}</p>}
 

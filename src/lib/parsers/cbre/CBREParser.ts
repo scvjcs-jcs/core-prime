@@ -1,6 +1,6 @@
 import type { ExtractedField, ParsedBuilding, ParsedListing, ParserPage, ParserResult } from "../types";
 
-export const CBRE_PARSER_VERSION = "CBRE-v1.2.0";
+export const CBRE_PARSER_VERSION = "CBRE-v1.3.0";
 
 const f = <T>(value: T | null, raw: string | null, page: number, confidence: number): ExtractedField<T> => ({
   value,
@@ -66,6 +66,36 @@ function matchingNameFromTitle(title: string): string {
   return inner && inner.length >= 2 ? inner : title;
 }
 
+
+function collapsedText(text: string): string {
+  return text.replace(/[\u00a0\t\r\n]+/g, " ").replace(/\s{2,}/g, " ").trim();
+}
+
+function cleanTitle(raw: string): string | null {
+  let title = raw
+    .replace(/^CBD\s+/i, "")
+    .replace(/^GBD\s+/i, "")
+    .replace(/^YBD\s+/i, "")
+    .replace(/^Office\s*\|\s*For Lease\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  title = title.replace(/\s+(?:Building Image|General Information|Location Map|Availabilities|FACILITIES|Floorplans?|ACCESSIBILITY).*$/i, "").trim();
+  if (title.length < 3 || title.length > 140) return null;
+  const lower = title.toLowerCase();
+  if (BAD_TITLE_PARTS.some((x) => lower.includes(x))) return null;
+  if (title.includes("@") || /010[-\s]?\d/.test(title) || HUMAN_ROLE_RE.test(title)) return null;
+  if (!/[가-힣A-Za-z]/.test(title)) return null;
+  return title;
+}
+
+function anchorTitle(text: string): string | null {
+  const collapsed = collapsedText(text);
+  // unpdf can flatten a visually multi-line page into one text stream.  Anchor the
+  // heading between "Office | For Lease" and the first known section label.
+  const m = collapsed.match(/Office\s*\|\s*For Lease\s+(.{3,180}?)(?=\s+(?:Building Image|General Information|Location Map|Availabilities|FACILITIES|Floorplans?|ACCESSIBILITY|CBRE Contacts:?))/i);
+  return m ? cleanTitle(m[1]) : null;
+}
+
 function titleCandidates(text: string): Array<{ title: string; score: number }> {
   const lines = linesOf(text);
   const officeIdx = lines.findIndex((x) => /^Office\s*\|\s*For Lease/i.test(x));
@@ -102,12 +132,13 @@ function titleCandidates(text: string): Array<{ title: string; score: number }> 
 }
 
 function detectTitle(text: string, currentTitle: string | null): string | null {
-  // Continuation pages often repeat the building title at an arbitrary location because
-  // PDF text items are not emitted in visual row order. Exact current-title reuse is safest.
-  if (currentTitle && text.includes(currentTitle)) return currentTitle;
+  const collapsed = collapsedText(text);
+  if (currentTitle && (text.includes(currentTitle) || collapsed.includes(collapsedText(currentTitle)))) return currentTitle;
+  const anchored = anchorTitle(text);
+  if (anchored) return anchored;
   const best = titleCandidates(text)[0];
-  if (best) return best.title;
-  if (currentTitle && /(Availabilities|Facilities|Floorplan|ACCESSIBILITY)/i.test(text)) return currentTitle;
+  if (best) return cleanTitle(best.title) ?? best.title;
+  if (currentTitle && /(Availabilities|Facilities|Floorplans?|ACCESSIBILITY)/i.test(text)) return currentTitle;
   return null;
 }
 
@@ -138,6 +169,39 @@ function rateValues(blob: string): number[] {
   return [...blob.matchAll(/@?([\d,]{4,})\s*원/g)]
     .map((m) => n(m[1]))
     .filter((x): x is number => x !== null);
+}
+
+
+function parseFlattenedListingRows(text: string, page: number): ParsedListing[] {
+  const collapsed = collapsedText(text);
+  if (!/Availabilities/i.test(collapsed)) return [];
+  const out: ParsedListing[] = [];
+  // Fallback for unpdf output where table rows lose line breaks but preserve token order.
+  const rowRe = /(?:^|\s)((?:B\d+|\d+)(?:층|F)(?:\s*\([^)]*\))?(?:\s*(?:일부|전체))?)\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)/gi;
+  for (const m of collapsed.matchAll(rowRe)) {
+    const floorRaw = m[1].replace(/\s+/g, " ").trim();
+    const grossPy=n(m[2]), grossSqm=n(m[3]), exclusivePy=n(m[4]), exclusiveSqm=n(m[5]);
+    if ([grossPy,grossSqm,exclusivePy,exclusiveSqm].some((x)=>x===null)) continue;
+    const gp=grossPy as number, gs=grossSqm as number, ep=exclusivePy as number, es=exclusiveSqm as number;
+    const grossRatio=gp>0?gs/gp:0, exclusiveRatio=ep>0?es/ep:3.3058;
+    if (!(gp>0 && ep>=0 && grossRatio>=2.75 && grossRatio<=3.65 && exclusiveRatio>=2.75 && exclusiveRatio<=3.65 && ep<=gp*1.15)) continue;
+    const start=(m.index ?? 0)+m[0].length;
+    const tail=collapsed.slice(start, Math.min(collapsed.length,start+180));
+    const move=tail.match(/(즉시\s*가능|즉시가능|즉시|협의\s*필요|협의|\d{4}년\s*\d{1,2}월(?:\s*\d{1,2}일|\s*중|\s*\([^)]*\))?)/)?.[1]?.replace(/\s+/g," ") ?? null;
+    const rates=rateValues(tail).filter((x)=>x>=10_000 && x<=1_000_000);
+    out.push({
+      floor: floorRaw, unit:null, source_page:page, warnings:["PDF 표 행이 한 줄로 평탄화되어 fallback parser로 구조화됨"],
+      extracted_data:{
+        floor_raw:f(floorRaw,floorRaw,page,0.96),
+        gross_area_py:f(gp,m[2],page,0.96), gross_area_sqm:f(gs,m[3],page,0.96),
+        exclusive_area_py:f(ep,m[4],page,0.96), exclusive_area_sqm:f(es,m[5],page,0.96),
+        rent_per_py:f(rates[0] ?? null,rates[0]!==undefined?String(rates[0]):null,page,rates[0]!==undefined?0.7:0),
+        maintenance_per_py:f(rates[1] ?? null,rates[1]!==undefined?String(rates[1]):null,page,rates[1]!==undefined?0.7:0),
+        move_in_text:f(move,move,page,move?0.78:0), _source_row:m[0].trim(), _fallback:"FLATTENED_ROW_V1"
+      }
+    });
+  }
+  return out;
 }
 
 function parseListingRows(text: string, page: number): { listings: ParsedListing[]; warnings: string[] } {
@@ -224,10 +288,12 @@ function parseListingRows(text: string, page: number): { listings: ParsedListing
     i = Math.max(j, i + 1);
   }
 
-  if (sawFloorCandidate && out.length === 0 && /Availabilities/i.test(text) && !/공실\s*뒷장\s*참고/.test(text)) {
-    warnings.push(`p.${page}: 공실 층 표기는 감지했지만 면적 행을 구조화하지 못함`);
+  const fallback = parseFlattenedListingRows(text, page);
+  const combined = dedupeListings([...out, ...fallback]);
+  if ((sawFloorCandidate || /Availabilities/i.test(text)) && combined.length === 0 && !/공실\s*뒷장\s*참고/.test(text)) {
+    warnings.push(`p.${page}: 공실 표를 감지했지만 면적 행을 구조화하지 못함`);
   }
-  return { listings: out, warnings };
+  return { listings: combined, warnings };
 }
 
 function mergeFacts(target: Record<string, unknown>, facts: Record<string, ExtractedField<unknown>>) {
@@ -265,7 +331,10 @@ export function parseCBREPages(pages: ParserPage[]): ParserResult {
 
   for (const p of [...pages].sort((a, b) => a.page_number - b.page_number)) {
     const text = p.extracted_text ?? "";
-    if (!text.trim() || !/Office\s*\|\s*For Lease/i.test(text)) continue;
+    if (!text.trim()) continue;
+    const isLeasePage = /Office\s*\|\s*For Lease/i.test(text);
+    const isContinuation = Boolean(current && /(Availabilities|Facilities|Floorplans?|ACCESSIBILITY)/i.test(text));
+    if (!isLeasePage && !isContinuation) continue;
 
     const title = detectTitle(text, current?.raw_building_name ?? null);
     if (!title) {
