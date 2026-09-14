@@ -1,6 +1,6 @@
 import type { ExtractedField, ParsedBuilding, ParsedListing, ParserPage, ParserResult } from "../types";
 
-export const CBRE_PARSER_VERSION = "CBRE-v1.4.0";
+export const CBRE_PARSER_VERSION = "CBRE-v1.5.0";
 
 const f = <T>(value: T | null, raw: string | null, page: number, confidence: number): ExtractedField<T> => ({
   value,
@@ -89,6 +89,84 @@ function cleanTitle(raw: string): string | null {
 }
 
 
+
+function isGenericTitleLine(line: string): boolean {
+  const lower = line.toLowerCase();
+  if (!line || line.length < 2 || line.length > 120) return true;
+  if (BAD_TITLE_PARTS.some((x) => lower.includes(x))) return true;
+  if (/^(?:office|for lease|cbre contacts:?|confidential|proprietary|floorplan|floorplans|availabilities|facilities|general information|building image|location map)$/i.test(line)) return true;
+  if (/^[|｜]$/.test(line)) return true;
+  if (/^\d+$/.test(line)) return true;
+  if (/010[-\s]?\d/.test(line) || /@/.test(line)) return true;
+  if (HUMAN_ROLE_RE.test(line)) return true;
+  return false;
+}
+
+function itemStreamTitleCandidates(text: string): Array<{ title: string; score: number }> {
+  // pdf.js / unpdf often emits every text item as a separate line and the visual
+  // header order is not the same as reading order.  In CBRE files the building
+  // title is usually an English item immediately followed by a Korean item, e.g.
+  // `Seoul Finance Center` + `서울파이낸스센터`.  Detect that pair anywhere on
+  // the lease page instead of assuming it follows `Office | For Lease`.
+  const lines = linesOf(text);
+  const candidates: Array<{ title: string; score: number; order: number }> = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const a = lines[i];
+    if (isGenericTitleLine(a)) continue;
+
+    if (/^[*※•]/.test(a)) continue;
+    const aHasLatin = /[A-Za-z]/.test(a);
+    const aHasKorean = /[가-힣]/.test(a);
+
+    // Some CBRE buildings use an English-only official name (for example G1 Seoul).
+    // If it appears immediately before the address block, it is a strong title signal.
+    if (aHasLatin && !aHasKorean && lines.slice(i + 1, i + 8).includes("주소")) {
+      const cleaned = cleanTitle(a);
+      if (cleaned) {
+        let score = 29;
+        if (/(tower|building|center|square|place|plaza|city|park|cube|grove|seoul)/i.test(cleaned)) score += 3;
+        candidates.push({ title: cleaned, score, order: i });
+      }
+    }
+
+    // Same-item bilingual title (works with pdftotext-like extractors).
+    if (aHasLatin && aHasKorean) {
+      const cleaned = cleanTitle(a);
+      if (cleaned) {
+        let score = 18;
+        if (/(tower|building|center|square|place|plaza|city|park|cube|grove|타워|빌딩|센터|스퀘어|플레이스)/i.test(cleaned)) score += 3;
+        if (lines.slice(i + 1, i + 12).includes("주소")) score += 6;
+        candidates.push({ title: cleaned, score, order: i });
+      }
+    }
+
+    // Split-item bilingual title (the dominant unpdf case).
+    if (aHasLatin && !aHasKorean) {
+      for (let j = i + 1; j <= Math.min(i + 4, lines.length - 1); j += 1) {
+        const b = lines[j];
+        if (isGenericTitleLine(b)) continue;
+        if (/^[(*※•]/.test(b)) continue;
+        if (!/[가-힣]/.test(b) || /[A-Za-z]/.test(b)) continue;
+        if (b.length > 80 || /^(주소|지하철역|연면적|준공년도|규모|전용률|주차대수|기준층|임대면적|전용면적|입주가능시기|층|평|sqm)$/i.test(b)) continue;
+
+        const combined = cleanTitle(`${a} ${b}`);
+        if (!combined) continue;
+        let score = 20;
+        if (/(tower|building|center|square|place|plaza|city|park|cube|grove|타워|빌딩|센터|스퀘어|플레이스)/i.test(combined)) score += 3;
+        if (lines.slice(j + 1, j + 18).includes("주소")) score += 8;
+        if (i > 0 && /^CBRE Contacts:?$/i.test(lines[i - 1])) score += 2;
+        candidates.push({ title: combined, score, order: i });
+        break;
+      }
+    }
+  }
+
+  return candidates
+    .sort((x, y) => y.score - x.score || x.order - y.order)
+    .map(({ title, score }) => ({ title, score }));
+}
+
 function markerSliceTitle(text: string): string | null {
   // Robust fallback for extractors that collapse the entire page into one stream.
   const marker = /Office\s*[|｜]\s*For\s+Lease/i;
@@ -152,6 +230,13 @@ function titleCandidates(text: string): Array<{ title: string; score: number }> 
 function detectTitle(text: string, currentTitle: string | null): string | null {
   const collapsed = collapsedText(text);
   if (currentTitle && (text.includes(currentTitle) || collapsed.includes(collapsedText(currentTitle)))) return currentTitle;
+
+  // First try the item-stream strategy. This specifically matches the text order
+  // produced by the production unpdf extractor, where `Office`, `|`, `For Lease`,
+  // section labels and contacts may appear before the actual building title.
+  const streamBest = itemStreamTitleCandidates(text)[0];
+  if (streamBest) return streamBest.title;
+
   const anchored = anchorTitle(text);
   if (anchored) return anchored;
   const markerFallback = markerSliceTitle(text);
@@ -367,7 +452,7 @@ export function parseCBREPages(pages: ParserPage[]): ParserResult {
     let building = byName.get(key) ?? null;
 
     if (!building) {
-      const titleConfidence = titleCandidates(text).some((x) => x.title === title) ? 0.98 : 0.85;
+      const titleConfidence = itemStreamTitleCandidates(text).some((x) => x.title === title) || titleCandidates(text).some((x) => x.title === title) ? 0.98 : 0.85;
       building = {
         raw_building_name: title,
         normalized_building_name: key,
