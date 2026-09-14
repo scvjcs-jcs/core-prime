@@ -78,11 +78,19 @@ begin
     v_existing_count := 0;
 
     if v_addr is not null then
-      select count(*), min(id)
-        into v_existing_count, v_existing
+      select count(*)
+        into v_existing_count
         from public.buildings
        where deleted_at is null
          and trim(coalesce(road_address,'')) = v_addr;
+
+      select id
+        into v_existing
+        from public.buildings
+       where deleted_at is null
+         and trim(coalesce(road_address,'')) = v_addr
+       order by id::text
+       limit 1;
 
       -- 주소 일치는 없지만 같은 이름의 기존 건물이 있으면 자동 생성하지 않고 검토로 보낸다.
       if v_existing_count = 0 and v_norm is not null and exists (
@@ -97,11 +105,19 @@ begin
         continue;
       end if;
     elsif v_norm is not null then
-      select count(*), min(id)
-        into v_existing_count, v_existing
+      select count(*)
+        into v_existing_count
         from public.buildings
        where deleted_at is null
          and normalized_name = v_norm;
+
+      select id
+        into v_existing
+        from public.buildings
+       where deleted_at is null
+         and normalized_name = v_norm
+       order by id::text
+       limit 1;
     end if;
 
     if v_existing_count = 1 and v_existing is not null then
