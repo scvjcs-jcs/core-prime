@@ -559,8 +559,13 @@ export async function generateSemanticStaging(sourceDocumentId: string): Promise
   // Large CBRE packages should never silently replace staging with a clearly broken result.
   // This is deliberately conservative: it catches the observed 367p / 12-listing failure without
   // assuming an exact market vacancy count for future monthly packages.
-  if (doc.parser_type === "CBRE" && pages.length >= 200 && parsedListingCount < 50) {
-    return { error: `CBRE 구조화 품질검사 실패: ${pages.length}페이지에서 공실 후보가 ${parsedListingCount}건만 감지되었습니다. 기존 Staging은 변경하지 않았습니다.` };
+  if (doc.parser_type === "CBRE" && pages.length >= 200) {
+    const parsedBuildingCount = parsed.buildings.length;
+    const minListings = pages.length >= 300 ? 200 : 50;
+    const minBuildings = pages.length >= 300 ? 150 : 50;
+    if (parsedListingCount < minListings || parsedBuildingCount < minBuildings) {
+      return { error: `CBRE 구조화 품질검사 실패: ${pages.length}페이지에서 건물 ${parsedBuildingCount}개 / 공실 ${parsedListingCount}건만 감지되었습니다. 안전 기준은 건물 ${minBuildings}개 이상 / 공실 ${minListings}건 이상입니다. 기존 Staging은 변경하지 않았습니다.` };
+    }
   }
 
   const payload = parsed.buildings.map((b) => ({

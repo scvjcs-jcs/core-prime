@@ -1,6 +1,6 @@
 import type { ExtractedField, ParsedBuilding, ParsedListing, ParserPage, ParserResult } from "../types";
 
-export const CBRE_PARSER_VERSION = "CBRE-v1.5.0";
+export const CBRE_PARSER_VERSION = "CBRE-v1.7.0";
 
 const f = <T>(value: T | null, raw: string | null, page: number, confidence: number): ExtractedField<T> => ({
   value,
@@ -17,7 +17,7 @@ const n = (v?: string | null) => {
 
 const compactNorm = (v: string) => v.toLowerCase().replace(/[\s·._\-()[\]{}]/g, "");
 
-const HUMAN_ROLE_RE = /(상무|부장|차장|과장|대리|사원|이사|대표|전무|팀장)$/;
+const HUMAN_ROLE_RE = /(상무|부장|차장|과장|대리|사원|이사|대표|전무|팀장)/;
 const BAD_TITLE_PARTS = [
   "confidential & proprietary",
   "building image",
@@ -81,6 +81,10 @@ function cleanTitle(raw: string): string | null {
     .trim();
   title = title.replace(/\s+(?:Building Image|General Information|Location Map|Availabilities|FACILITIES|Floorplans?|ACCESSIBILITY).*$/i, "").trim();
   if (title.length < 3 || title.length > 140) return null;
+  if (/^(?:sqm|평|층|주소|지하철역|연면적|준공년도|규모|전용률|주차대수|기준층|임대면적|전용면적)(?:\s|$)/i.test(title)) return null;
+  if (/^(?:B\d+\s*\/\s*\d+F|\d+F\s*\/\s*B\d+)/i.test(title)) return null;
+  if (/^(?:서울특별시|서울시|경기도|인천광역시|부산광역시|대구광역시|대전광역시|광주광역시|울산광역시|세종특별자치시)/.test(title)) return null;
+  if (/(?:호선|지하철역|도보\s*\d)/.test(title) && !/(tower|building|center|square|place|plaza|타워|빌딩|센터|스퀘어|플레이스)/i.test(title)) return null;
   const lower = title.toLowerCase();
   if (BAD_TITLE_PARTS.some((x) => lower.includes(x))) return null;
   if (title.includes("@") || /010[-\s]?\d/.test(title) || HUMAN_ROLE_RE.test(title)) return null;
@@ -99,6 +103,9 @@ function isGenericTitleLine(line: string): boolean {
   if (/^\d+$/.test(line)) return true;
   if (/010[-\s]?\d/.test(line) || /@/.test(line)) return true;
   if (HUMAN_ROLE_RE.test(line)) return true;
+  if (/(?:호선|도보\s*\d|지하철역)/.test(line) && !/(tower|building|center|square|place|plaza|타워|빌딩|센터|스퀘어|플레이스)/i.test(line)) return true;
+  if (/^(?:서울특별시|서울시|경기도|인천광역시|부산광역시|대구광역시|대전광역시|광주광역시|울산광역시|세종특별자치시)\b/.test(line)) return true;
+  if (/(?:대로|로|길)\s*\d{1,4}(?:[- ]\d+)?$/.test(line) && !/(tower|building|center|square|place|plaza|타워|빌딩|센터|스퀘어|플레이스)/i.test(line)) return true;
   return false;
 }
 
@@ -135,6 +142,7 @@ function itemStreamTitleCandidates(text: string): Array<{ title: string; score: 
       const cleaned = cleanTitle(a);
       if (cleaned) {
         let score = 18;
+        if ((cleaned.match(/[A-Za-z]{2,}/g) ?? []).length >= 2) score += 8;
         if (/(tower|building|center|square|place|plaza|city|park|cube|grove|타워|빌딩|센터|스퀘어|플레이스)/i.test(cleaned)) score += 3;
         if (lines.slice(i + 1, i + 12).includes("주소")) score += 6;
         candidates.push({ title: cleaned, score, order: i });
@@ -153,6 +161,7 @@ function itemStreamTitleCandidates(text: string): Array<{ title: string; score: 
         const combined = cleanTitle(`${a} ${b}`);
         if (!combined) continue;
         let score = 20;
+        if ((combined.match(/[A-Za-z]{2,}/g) ?? []).length >= 2) score += 8;
         if (/(tower|building|center|square|place|plaza|city|park|cube|grove|타워|빌딩|센터|스퀘어|플레이스)/i.test(combined)) score += 3;
         if (lines.slice(j + 1, j + 18).includes("주소")) score += 8;
         if (i > 0 && /^CBRE Contacts:?$/i.test(lines[i - 1])) score += 2;
@@ -277,6 +286,94 @@ function rateValues(blob: string): number[] {
 }
 
 
+
+function extractPageWideTerms(text: string, page: number) {
+  const joined = linesOf(text).join(" ");
+  const move = joined.match(/(즉시\s*가능|즉시가능|즉시|협의\s*필요|협의|\d{4}년\s*\d{1,2}월(?:\s*\d{1,2}일|\s*중|\s*\([^)]*\)|\s*\(예정\))?)/)?.[1]?.replace(/\s+/g, " ") ?? null;
+  const rent = joined.match(/(?:임대료\s*\/?3\.3㎡|임대료\s*\(원\/?평\)|임대료)\s*[:：]?\s*@?([\d,]+)\s*원/i)?.[1] ?? null;
+  const maintenance = joined.match(/(?:관리비\s*\/?3\.3㎡|관리비\s*\(원\/?평\)|관리비)\s*[:：]?\s*@?([\d,]+)\s*원/i)?.[1] ?? null;
+
+  // In many CBRE pages the values are visually below the headers and unpdf emits
+  // the header tokens first, then the values later.  If direct header/value matching
+  // fails, use the first plausible won-denominated rates after the availability block.
+  const allRates = [...joined.matchAll(/@?([\d,]{4,})\s*원/g)]
+    .map((m) => n(m[1]))
+    .filter((x): x is number => x !== null && x >= 10_000 && x <= 1_000_000);
+
+  const rentValue = n(rent) ?? allRates[0] ?? null;
+  const maintenanceValue = n(maintenance) ?? allRates[1] ?? null;
+  return {
+    move_in_text: f(move, move, page, move ? 0.86 : 0),
+    rent_per_py: f(rentValue, rentValue !== null ? String(rentValue) : null, page, rentValue !== null ? 0.74 : 0),
+    maintenance_per_py: f(maintenanceValue, maintenanceValue !== null ? String(maintenanceValue) : null, page, maintenanceValue !== null ? 0.74 : 0),
+  };
+}
+
+function parseTokenStreamListingRows(text: string, page: number): ParsedListing[] {
+  const lines = linesOf(text);
+  const out: ParsedListing[] = [];
+  const start = lines.findIndex((x) => /^Availabilities$/i.test(x) || /^Availability$/i.test(x));
+  if (start < 0) return out;
+
+  const stopCandidates = [
+    lines.findIndex((x, i) => i > start && /^합계/.test(x)),
+    lines.findIndex((x, i) => i > start && /^CBRE Contacts:?$/i.test(x)),
+  ].filter((x) => x > start);
+  const stop = stopCandidates.length ? Math.min(...stopCandidates) : Math.min(lines.length, start + 240);
+  const globalTerms = extractPageWideTerms(text, page);
+
+  const isAreaNumber = (v: string) => /^\d{1,3}(?:,\d{3})*(?:\.\d+)?$/.test(v) || /^\d+(?:\.\d+)?$/.test(v);
+  const headerNoise = /^(?:임대면적|전용면적|평|sqm|층|입주가능시기|임대료 \/3\.3㎡|관리비 \/3\.3㎡)$/i;
+
+  for (let i = start + 1; i < stop; i += 1) {
+    const floorLine = lines[i];
+    const floorMatch = floorLine.match(FLOOR_RE);
+    if (!floorMatch || /^(층|합계)/.test(floorLine)) continue;
+
+    let floorRaw = floorMatch[0].replace(/\s+/g, " ").trim();
+    const vals: Array<{ raw: string; value: number }> = [];
+    let j = i + 1;
+    while (j < stop && vals.length < 4) {
+      const token = lines[j].trim();
+      if (FLOOR_RE.test(token) && vals.length < 4) break;
+      if (headerNoise.test(token) || !token) { j += 1; continue; }
+      if (/^\(표기\s*[^)]+\)$/.test(token)) { floorRaw = `${floorRaw} ${token}`; j += 1; continue; }
+      if (isAreaNumber(token)) {
+        const value = n(token);
+        if (value !== null) vals.push({ raw: token, value });
+      }
+      j += 1;
+    }
+    if (vals.length < 4) continue;
+
+    const [grossPy, grossSqm, exclusivePy, exclusiveSqm] = vals.map((x) => x.value);
+    const grossRatio = grossPy > 0 ? grossSqm / grossPy : 0;
+    const exclusiveRatio = exclusivePy > 0 ? exclusiveSqm / exclusivePy : 3.3058;
+    const areaLooksValid = grossPy > 0 && exclusivePy >= 0 && grossRatio >= 2.75 && grossRatio <= 3.65 && exclusiveRatio >= 2.75 && exclusiveRatio <= 3.65 && exclusivePy <= grossPy * 1.15;
+    if (!areaLooksValid) continue;
+
+    const rowWarnings = ["CBRE text-item stream parser로 구조화됨"];
+    if (/\d+\s*[~–-]\s*\d+/.test(floorRaw)) rowWarnings.push("층 범위 표기: 원문 범위를 유지하고 자동 분할하지 않음");
+    out.push({
+      floor: floorRaw,
+      unit: null,
+      source_page: page,
+      warnings: rowWarnings,
+      extracted_data: {
+        floor_raw: f(floorRaw, floorRaw, page, 0.98),
+        gross_area_py: f(grossPy, vals[0].raw, page, 0.98),
+        gross_area_sqm: f(grossSqm, vals[1].raw, page, 0.98),
+        exclusive_area_py: f(exclusivePy, vals[2].raw, page, 0.98),
+        exclusive_area_sqm: f(exclusiveSqm, vals[3].raw, page, 0.98),
+        ...globalTerms,
+        _source_row: [floorRaw, ...vals.map((x) => x.raw)].join(" "),
+        _fallback: "TOKEN_STREAM_V1",
+      },
+    });
+  }
+  return out;
+}
+
 function parseFlattenedListingRows(text: string, page: number): ParsedListing[] {
   const collapsed = collapsedText(text);
   if (!/Availabilities/i.test(collapsed)) return [];
@@ -310,6 +407,10 @@ function parseFlattenedListingRows(text: string, page: number): ParsedListing[] 
 }
 
 function parseListingRows(text: string, page: number): { listings: ParsedListing[]; warnings: string[] } {
+  // CBRE overview pages often show the full building facts table and the phrase
+  // "공실 뒷장 참고". Numbers such as B5 / 15F, typical-floor areas, parking, etc.
+  // must never be interpreted as vacancy rows. The actual vacancies are on the next page.
+  if (/공실\s*뒷장\s*참고/.test(text)) return { listings: [], warnings: [] };
   const lines = linesOf(text);
   const out: ParsedListing[] = [];
   const warnings: string[] = [];
@@ -393,8 +494,21 @@ function parseListingRows(text: string, page: number): { listings: ParsedListing
     i = Math.max(j, i + 1);
   }
 
+  const tokenStream = parseTokenStreamListingRows(text, page);
   const fallback = parseFlattenedListingRows(text, page);
-  const combined = dedupeListings([...out, ...fallback]);
+  // Prefer the line-aware parser when it successfully recovered vacancy rows.
+  // Token-stream/flattened parsers are fallbacks for extraction orders that lose row boundaries.
+  // Combining all three created duplicate rows such as `지상 14층` + `14층`.
+  const combined = dedupeListings(out.length > 0 ? out : tokenStream.length > 0 ? tokenStream : fallback);
+  const globalTerms = extractPageWideTerms(text, page);
+  for (const row of combined) {
+    const rent = row.extracted_data.rent_per_py as ExtractedField<number> | undefined;
+    const maintenance = row.extracted_data.maintenance_per_py as ExtractedField<number> | undefined;
+    const move = row.extracted_data.move_in_text as ExtractedField<string> | undefined;
+    if ((!rent || rent.value === null) && globalTerms.rent_per_py.value !== null) row.extracted_data.rent_per_py = globalTerms.rent_per_py;
+    if ((!maintenance || maintenance.value === null) && globalTerms.maintenance_per_py.value !== null) row.extracted_data.maintenance_per_py = globalTerms.maintenance_per_py;
+    if ((!move || move.value === null) && globalTerms.move_in_text.value !== null) row.extracted_data.move_in_text = globalTerms.move_in_text;
+  }
   if ((sawFloorCandidate || /Availabilities/i.test(text)) && combined.length === 0 && !/공실\s*뒷장\s*참고/.test(text)) {
     warnings.push(`p.${page}: 공실 표를 감지했지만 면적 행을 구조화하지 못함`);
   }
