@@ -1,6 +1,6 @@
 import type { ExtractedField, ParsedBuilding, ParsedListing, ParserPage, ParserResult } from "../types";
 
-export const CBRE_PARSER_VERSION = "CBRE-v1.8.0";
+export const CBRE_PARSER_VERSION = "CBRE-v1.8.1";
 
 const f = <T>(value: T | null, raw: string | null, page: number, confidence: number): ExtractedField<T> => ({
   value,
@@ -46,7 +46,7 @@ const BAD_TITLE_PARTS = [
   "담당자 문의",
 ];
 
-const FLOOR_RE = /^(?:(?:지상|지하)\s*)?(?:(?:B|P)\d+(?:\s*[~–-]\s*(?:(?:B|P)?\d+))?(?:층|F)?|\d+(?:\s*[~–-]\s*(?:B?\d+))?(?:층|F))(?:\s*\(\d+\))?(?:\s*(?:일부|전체))?/i;
+const FLOOR_RE = /^(?:(?:지상|지하)\s*)?(?:(?:B|P)\d+(?:\s*[~–-]\s*(?:(?:B|P)?\d+))?(?:층|F)?|\d+(?:\s*[~–-]\s*(?:B?\d+))?(?:층|F)|\d+호)(?:\s*\(\d+\))?(?:\s*(?:일부|전체))?/i;
 const NUMBER_RE = /@?(\d+(?:,\d{3})*(?:\.\d+)?)/g;
 
 function linesOf(text: string): string[] {
@@ -314,11 +314,76 @@ function rateValues(blob: string): number[] {
 
 
 
+
+function noVacancyDeclared(text: string): boolean {
+  return /(?:공실\s*(?:없음|없습니다|無)|현재\s*공실\s*없음|No\s+Vacanc(?:y|ies)|Vacanc(?:y|ies)\s*[:：-]?\s*(?:None|N\/?A|없음))/i.test(text);
+}
+
+
+type RateColumnModes = {
+  deposit: "PER_PY" | "TOTAL" | "NONE";
+  rent: "PER_PY" | "TOTAL" | "NONE";
+  maintenance: "PER_PY" | "TOTAL" | "NONE";
+};
+
+function detectRateColumnModes(text: string): RateColumnModes {
+  const joined = linesOf(text).join(" ");
+  const depositPerPy = /보증금\s*\/?\s*3\.3㎡|보증금\s*\(원\s*\/?\s*평\)|평당\s*보증금/i.test(joined);
+  const rentPerPy = /임대료\s*\/?\s*3\.3㎡|임대료\s*\(원\s*\/?\s*평\)|평당\s*임대료/i.test(joined);
+  const maintenancePerPy = /관리비\s*\/?\s*3\.3㎡|관리비\s*\(원\s*\/?\s*평\)|평당\s*관리비/i.test(joined);
+  const depositTotal = /층별\s*보증금|총\s*보증금|(?:^|\s)보증금(?:\s|$)/i.test(joined) && !depositPerPy;
+  const rentTotal = /층별\s*임대료|월\s*임대료|임대료\s*\/\s*층/i.test(joined) && !rentPerPy;
+  const maintenanceTotal = /층별\s*관리비|월\s*관리비|관리비\s*\/\s*층/i.test(joined) && !maintenancePerPy;
+  return {
+    deposit: depositPerPy ? "PER_PY" : depositTotal ? "TOTAL" : "NONE",
+    rent: rentPerPy ? "PER_PY" : rentTotal ? "TOTAL" : "NONE",
+    maintenance: maintenancePerPy ? "PER_PY" : maintenanceTotal ? "TOTAL" : "NONE",
+  };
+}
+
+function rateFieldsFromWonValues(values: number[], page: number, modes: RateColumnModes) {
+  let idx = 0;
+  const result: Record<string, ExtractedField<number>> = {
+    deposit_per_py: f<number>(null, null, page, 0),
+    rent_per_py: f<number>(null, null, page, 0),
+    maintenance_per_py: f<number>(null, null, page, 0),
+    deposit_total_won: f<number>(null, null, page, 0),
+    monthly_rent_total_won: f<number>(null, null, page, 0),
+    management_fee_total_won: f<number>(null, null, page, 0),
+  };
+  const assign = (kind: keyof RateColumnModes, perPyKey: string, totalKey: string) => {
+    const mode = modes[kind];
+    if (mode === "NONE" || idx >= values.length) return;
+    const value = values[idx++];
+    if (mode === "PER_PY") result[perPyKey] = f(value, String(value), page, 0.94);
+    else result[totalKey] = f(value, String(value), page, 0.94);
+  };
+  assign("deposit", "deposit_per_py", "deposit_total_won");
+  assign("rent", "rent_per_py", "monthly_rent_total_won");
+  assign("maintenance", "maintenance_per_py", "management_fee_total_won");
+  return result;
+}
+
+function totalWonTerms(blob: string, page: number) {
+  const normalizeWon = (raw?: string | null) => raw ? n(raw) : null;
+  // Total-amount fields are intentionally separate from per-pyeong fields.
+  // Only capture values when an explicit Korean/English total label is nearby.
+  const dep = blob.match(/(?:총\s*)?(?:보증금|Deposit)(?:\s*총액)?\s*[:：]?\s*@?([\d,]{5,})\s*원?/i)?.[1] ?? null;
+  const rent = blob.match(/(?:총\s*)?(?:월\s*)?(?:임대료|월세|Monthly\s*Rent)(?:\s*총액)?\s*[:：]?\s*@?([\d,]{5,})\s*원?/i)?.[1] ?? null;
+  const mgmt = blob.match(/(?:총\s*)?(?:월\s*)?(?:관리비|Management\s*Fee)(?:\s*총액)?\s*[:：]?\s*@?([\d,]{5,})\s*원?/i)?.[1] ?? null;
+  const dv = normalizeWon(dep), rv = normalizeWon(rent), mv = normalizeWon(mgmt);
+  return {
+    deposit_total_won: f(dv, dep, page, dv !== null ? 0.96 : 0),
+    monthly_rent_total_won: f(rv, rent, page, rv !== null ? 0.96 : 0),
+    management_fee_total_won: f(mv, mgmt, page, mv !== null ? 0.96 : 0),
+  };
+}
+
 function extractPageWideTerms(text: string, page: number) {
   const joined = linesOf(text).join(" ");
   const move = joined.match(/(즉시\s*가능|즉시가능|즉시|협의\s*필요|협의|\d{4}년\s*\d{1,2}월(?:\s*\d{1,2}일|\s*중|\s*\([^)]*\)|\s*\(예정\))?)/)?.[1]?.replace(/\s+/g, " ") ?? null;
-  const rent = joined.match(/(?:임대료\s*\/?3\.3㎡|임대료\s*\(원\/?평\)|임대료)\s*[:：]?\s*@?([\d,]+)\s*원/i)?.[1] ?? null;
-  const maintenance = joined.match(/(?:관리비\s*\/?3\.3㎡|관리비\s*\(원\/?평\)|관리비)\s*[:：]?\s*@?([\d,]+)\s*원/i)?.[1] ?? null;
+  const rent = joined.match(/(?:임대료\s*\/?3\.3㎡|임대료\s*\(원\/?평\)|평당\s*임대료)\s*[:：]?\s*@?([\d,]+)\s*원/i)?.[1] ?? null;
+  const maintenance = joined.match(/(?:관리비\s*\/?3\.3㎡|관리비\s*\(원\/?평\)|평당\s*관리비)\s*[:：]?\s*@?([\d,]+)\s*원/i)?.[1] ?? null;
 
   // In many CBRE pages the values are visually below the headers and unpdf emits
   // the header tokens first, then the values later.  If direct header/value matching
@@ -348,6 +413,7 @@ function parseTokenStreamListingRows(text: string, page: number): ParsedListing[
   ].filter((x) => x > start);
   const stop = stopCandidates.length ? Math.min(...stopCandidates) : Math.min(lines.length, start + 240);
   const globalTerms = extractPageWideTerms(text, page);
+  const rateModes = detectRateColumnModes(text);
 
   const isAreaNumber = (v: string) => /^\d{1,3}(?:,\d{3})*(?:\.\d+)?$/.test(v) || /^\d+(?:\.\d+)?$/.test(v);
   const headerNoise = /^(?:임대면적|전용면적|평|sqm|층|입주가능시기|임대료 \/3\.3㎡|관리비 \/3\.3㎡)$/i;
@@ -379,8 +445,9 @@ function parseTokenStreamListingRows(text: string, page: number): ParsedListing[
     const areaLooksValid = grossPy > 0 && exclusivePy >= 0 && grossRatio >= 2.75 && grossRatio <= 3.65 && exclusiveRatio >= 2.75 && exclusiveRatio <= 3.65 && exclusivePy <= grossPy * 1.15;
     if (!areaLooksValid) continue;
 
-    const rowWarnings = ["CBRE text-item stream parser로 구조화됨"];
-    if (/\d+\s*[~–-]\s*\d+/.test(floorRaw)) rowWarnings.push("층 범위 표기: 원문 범위를 유지하고 자동 분할하지 않음");
+    const rowWarnings: string[] = [];
+    const rowInfos = ["CBRE text-item stream parser로 구조화됨"];
+    if (/\d+\s*[~–-]\s*\d+/.test(floorRaw)) rowInfos.push("층 범위 표기: 원문 범위를 유지하고 자동 분할하지 않음");
     out.push({
       floor: floorRaw,
       unit: null,
@@ -393,8 +460,10 @@ function parseTokenStreamListingRows(text: string, page: number): ParsedListing[
         exclusive_area_py: f(exclusivePy, vals[2].raw, page, 0.98),
         exclusive_area_sqm: f(exclusiveSqm, vals[3].raw, page, 0.98),
         ...globalTerms,
+        ...rateFieldsFromWonValues(rateValues(lines.slice(j, Math.min(stop, j + 12)).join(" ")), page, rateModes),
         _source_row: [floorRaw, ...vals.map((x) => x.raw)].join(" "),
         _fallback: "TOKEN_STREAM_V1",
+        _infos: rowInfos,
       },
     });
   }
@@ -405,6 +474,7 @@ function parseFlattenedListingRows(text: string, page: number): ParsedListing[] 
   const collapsed = collapsedText(text);
   if (!/Availabilities/i.test(collapsed)) return [];
   const out: ParsedListing[] = [];
+  const rateModes = detectRateColumnModes(text);
   // Fallback for unpdf output where table rows lose line breaks but preserve token order.
   const rowRe = /(?:^|\s)((?:B\d+|\d+)(?:층|F)(?:\s*\([^)]*\))?(?:\s*(?:일부|전체))?)\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)/gi;
   for (const m of collapsed.matchAll(rowRe)) {
@@ -419,14 +489,15 @@ function parseFlattenedListingRows(text: string, page: number): ParsedListing[] 
     const move=tail.match(/(즉시\s*가능|즉시가능|즉시|협의\s*필요|협의|\d{4}년\s*\d{1,2}월(?:\s*\d{1,2}일|\s*중|\s*\([^)]*\))?)/)?.[1]?.replace(/\s+/g," ") ?? null;
     const rates=rateValues(tail).filter((x)=>x>=10_000 && x<=1_000_000);
     out.push({
-      floor: floorRaw, unit:null, source_page:page, warnings:["PDF 표 행이 한 줄로 평탄화되어 fallback parser로 구조화됨"],
+      floor: floorRaw, unit:null, source_page:page, warnings:[],
       extracted_data:{
         floor_raw:f(floorRaw,floorRaw,page,0.96),
         gross_area_py:f(gp,m[2],page,0.96), gross_area_sqm:f(gs,m[3],page,0.96),
         exclusive_area_py:f(ep,m[4],page,0.96), exclusive_area_sqm:f(es,m[5],page,0.96),
-        rent_per_py:f(rates[0] ?? null,rates[0]!==undefined?String(rates[0]):null,page,rates[0]!==undefined?0.7:0),
-        maintenance_per_py:f(rates[1] ?? null,rates[1]!==undefined?String(rates[1]):null,page,rates[1]!==undefined?0.7:0),
-        move_in_text:f(move,move,page,move?0.78:0), _source_row:m[0].trim(), _fallback:"FLATTENED_ROW_V1"
+        ...rateFieldsFromWonValues(rateValues(tail), page, rateModes),
+        move_in_text:f(move,move,page,move?0.78:0),
+        _source_row:m[0].trim(), _fallback:"FLATTENED_ROW_V1",
+        _infos:["PDF 표 행이 한 줄로 평탄화되어 fallback parser로 구조화됨"]
       }
     });
   }
@@ -437,10 +508,11 @@ function parseListingRows(text: string, page: number): { listings: ParsedListing
   // CBRE overview pages often show the full building facts table and the phrase
   // "공실 뒷장 참고". Numbers such as B5 / 15F, typical-floor areas, parking, etc.
   // must never be interpreted as vacancy rows. The actual vacancies are on the next page.
-  if (/공실\s*뒷장\s*참고/.test(text)) return { listings: [], warnings: [] };
+  if (/공실\s*뒷장\s*참고/.test(text) || noVacancyDeclared(text)) return { listings: [], warnings: [] };
   const lines = linesOf(text);
   const out: ParsedListing[] = [];
   const warnings: string[] = [];
+  const rateModes = detectRateColumnModes(text);
   let wing: string | null = null;
   let sawFloorCandidate = false;
 
@@ -488,15 +560,14 @@ function parseListingRows(text: string, page: number): { listings: ParsedListing
       if (areaLooksValid) {
         const move = blob.match(/(즉시\s*가능|즉시가능|즉시|협의\s*필요|협의|\d{4}년\s*\d{1,2}월(?:\s*\d{1,2}일|\s*중|\s*\([^)]*\))?)/)?.[1]?.replace(/\s+/g, " ") ?? null;
         const rates = rateValues(blob).filter((x) => x >= 10_000);
-        // CBRE also contains floor-total rent tables. Only treat values as per-pyeong when
-        // they are in a plausible per-pyeong range. Larger totals remain unassigned.
-        const plausiblePerPy = rates.filter((x) => x <= 1_000_000);
-        const rent = plausiblePerPy[0] ?? null;
-        const maintenance = plausiblePerPy[1] ?? null;
+        const rateFields = rateFieldsFromWonValues(rates, page, rateModes);
         const sourceFloor = wing ? `${wing} ${floorRaw}` : floorRaw;
         const rowWarnings: string[] = [];
-        if (/^[^\d]*(?:\d+\s*[~–-]\s*\d+|B\d+\s*[~–-]\s*B?\d+)/i.test(floorRaw)) rowWarnings.push("층 범위 표기: 원문 범위를 유지하고 자동 분할하지 않음");
-        if (rates.some((x) => x > 1_000_000)) rowWarnings.push("층별 총액형 임대조건 감지: 평당 단가로 추정하지 않음");
+        const rowInfos: string[] = [];
+        if (/^[^\d]*(?:\d+\s*[~–-]\s*\d+|B\d+\s*[~–-]\s*B?\d+)/i.test(floorRaw)) rowInfos.push("층 범위 표기: 원문 범위를 유지하고 자동 분할하지 않음");
+        const hasTotal = [rateFields.deposit_total_won, rateFields.monthly_rent_total_won, rateFields.management_fee_total_won].some((x) => x.value !== null);
+        if (hasTotal) rowInfos.push("총액형 임대조건 확인: 평당 단가로 환산하지 않고 원 단위 총액을 보존함");
+        if (rates.length > 0 && Object.values(rateModes).every((x) => x === "NONE")) rowWarnings.push("금액값을 감지했지만 표 헤더에서 단위/항목을 명확히 구분하지 못함");
 
         out.push({
           floor: sourceFloor,
@@ -509,10 +580,10 @@ function parseListingRows(text: string, page: number): { listings: ParsedListing
             gross_area_sqm: f(grossSqm, String(grossSqm), page, 0.98),
             exclusive_area_py: f(exclusivePy, String(exclusivePy), page, 0.98),
             exclusive_area_sqm: f(exclusiveSqm, String(exclusiveSqm), page, 0.98),
-            rent_per_py: f(rent, rent !== null ? String(rent) : null, page, rent !== null ? 0.78 : 0),
-            maintenance_per_py: f(maintenance, maintenance !== null ? String(maintenance) : null, page, maintenance !== null ? 0.78 : 0),
+            ...rateFields,
             move_in_text: f(move, move, page, move ? 0.9 : 0),
             _source_row: blob,
+            _infos: rowInfos,
           },
         });
       }
@@ -536,7 +607,7 @@ function parseListingRows(text: string, page: number): { listings: ParsedListing
     if ((!maintenance || maintenance.value === null) && globalTerms.maintenance_per_py.value !== null) row.extracted_data.maintenance_per_py = globalTerms.maintenance_per_py;
     if ((!move || move.value === null) && globalTerms.move_in_text.value !== null) row.extracted_data.move_in_text = globalTerms.move_in_text;
   }
-  if ((sawFloorCandidate || /Availabilities/i.test(text)) && combined.length === 0 && !/공실\s*뒷장\s*참고/.test(text)) {
+  if ((sawFloorCandidate || /Availabilities/i.test(text)) && combined.length === 0 && !/공실\s*뒷장\s*참고/.test(text) && !noVacancyDeclared(text)) {
     warnings.push(`p.${page}: 공실 표를 감지했지만 면적 행을 구조화하지 못함`);
   }
   return { listings: combined, warnings };
@@ -554,7 +625,11 @@ function merge(current: ParsedBuilding, text: string, page: number) {
   const rows = parseListingRows(text, page);
   current.listings.push(...rows.listings);
   current.warnings.push(...rows.warnings);
-  if (/공실\s*(?:없음|없습니다)/.test(text)) current.extracted_data.vacancy_status = f("NO_VACANCY", "공실 없음", page, 1);
+  if (noVacancyDeclared(text)) {
+    current.extracted_data.vacancy_status = f("NO_VACANCY", "공실 없음 / No Vacancy", page, 1);
+    const infos = Array.isArray(current.extracted_data._infos) ? current.extracted_data._infos as string[] : [];
+    current.extracted_data._infos = [...infos, "원문에 공실 없음이 명시되어 공실 0건으로 정상 처리됨"];
+  }
 }
 
 function dedupeListings(listings: ParsedListing[]): ParsedListing[] {
@@ -584,7 +659,7 @@ export function parseCBREPages(pages: ParserPage[]): ParserResult {
 
     const title = detectTitle(text, current?.raw_building_name ?? null);
     if (!title) {
-      if (/Availabilities/i.test(text)) globalWarnings += 1;
+      if (/Availabilities/i.test(text) && !noVacancyDeclared(text)) globalWarnings += 1;
       continue;
     }
 
