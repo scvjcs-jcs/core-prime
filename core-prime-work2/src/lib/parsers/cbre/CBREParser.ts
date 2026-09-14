@@ -1,6 +1,6 @@
 import type { ExtractedField, ParsedBuilding, ParsedListing, ParserPage, ParserResult } from "../types";
 
-export const CBRE_PARSER_VERSION = "CBRE-v1.4.0";
+export const CBRE_PARSER_VERSION = "CBRE-v1.3.0";
 
 const f = <T>(value: T | null, raw: string | null, page: number, confidence: number): ExtractedField<T> => ({
   value,
@@ -88,24 +88,6 @@ function cleanTitle(raw: string): string | null {
   return title;
 }
 
-
-function markerSliceTitle(text: string): string | null {
-  // Robust fallback for extractors that collapse the entire page into one stream.
-  const marker = /Office\s*[|｜]\s*For\s+Lease/i;
-  const hit = marker.exec(text);
-  if (!hit || hit.index === undefined) return null;
-
-  let rest = text.slice(hit.index + hit[0].length, hit.index + hit[0].length + 1200);
-  rest = rest.replace(/^[\s\u00a0:：\-–—]+/, "");
-  const stop = rest.search(/(?:Building\s*Image|General\s*Information|Location\s*Map|Availabilit(?:y|ies)|FACILITIES|Floorplans?|ACCESSIBILITY|CBRE\s*Contacts?)/i);
-  if (stop >= 0) rest = rest.slice(0, stop);
-  rest = rest.replace(/Confidential\s*&\s*Proprietary.*$/i, "");
-  const candidate = rest.replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
-  if (!candidate) return null;
-  const words = candidate.split(/\s+/).slice(0, 18).join(" ");
-  return cleanTitle(words);
-}
-
 function anchorTitle(text: string): string | null {
   const collapsed = collapsedText(text);
   // unpdf can flatten a visually multi-line page into one text stream.  Anchor the
@@ -154,8 +136,6 @@ function detectTitle(text: string, currentTitle: string | null): string | null {
   if (currentTitle && (text.includes(currentTitle) || collapsed.includes(collapsedText(currentTitle)))) return currentTitle;
   const anchored = anchorTitle(text);
   if (anchored) return anchored;
-  const markerFallback = markerSliceTitle(text);
-  if (markerFallback) return markerFallback;
   const best = titleCandidates(text)[0];
   if (best) return cleanTitle(best.title) ?? best.title;
   if (currentTitle && /(Availabilities|Facilities|Floorplans?|ACCESSIBILITY)/i.test(text)) return currentTitle;
