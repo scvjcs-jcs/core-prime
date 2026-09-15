@@ -1,6 +1,6 @@
 import type { ExtractedField, ParsedBuilding, ParsedListing, ParserPage, ParserResult } from "../types";
 
-export const CBRE_PARSER_VERSION = "CBRE-v1.14.0";
+export const CBRE_PARSER_VERSION = "CBRE-v1.14.3";
 
 const f = <T>(value: T | null, raw: string | null, page: number, confidence: number): ExtractedField<T> => ({
   value,
@@ -297,8 +297,26 @@ function sliceLabelValue(joined: string, label: string, stopLabels: string[]): s
 function parseBuildingFacts(text: string, page: number) {
   const joined = linesOf(text).join(" ").replace(/\s{2,}/g, " ");
   const address = joined.match(/주소\s+(.+?)(?=\s+지하철역|\s+연면적|\s+준공년도|\s+규모)/i)?.[1]?.trim() ?? null;
-  const subway = joined.match(/지하철역\s+(.+?)(?=\s+연면적|\s+준공년도|\s+규모|\s+전용률|\s+주차대수)/i)?.[1]?.trim() ?? null;
-  const gfa = joined.match(/연면적\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\)/i);
+
+  // 지하철 정보는 PDF 열 순서 때문에 주소/연면적 값이 섞이기 쉽습니다.
+  // `N호선 ...역 ...` 패턴만 직접 수집해 오염된 텍스트를 교통정보로 저장하지 않도록 합니다.
+  const stationMatches = [...text.matchAll(/(?:\d+(?:,\d+)*호선|[가-힣A-Za-z]+선)\s+[가-힣A-Za-z0-9·]+역(?:\s*(?:직접\s*연결|지하\s*연결|도보\s*\d+(?:~\d+)?분(?:\s*내외)?|도보\s*\d+분\s*이내))?/gi)]
+    .map((m) => m[0].replace(/\s+/g, " ").trim());
+  const subway = stationMatches.length ? [...new Set(stationMatches)].slice(0, 3).join(" / ") : null;
+
+  // 일반정보 표의 값은 열 배치 때문에 라벨 다음 줄로 밀릴 수 있습니다.
+  // 같은 줄 패턴을 우선하고, 실패하면 제한된 raw-text window 안에서 재탐색합니다.
+  const gfaInline = joined.match(/연면적\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\)/i);
+  const gfaLabelPos = text.search(/연면적/i);
+  const gfaWindow = gfaLabelPos >= 0 ? text.slice(Math.max(0, gfaLabelPos - 260), Math.min(text.length, gfaLabelPos + 360)) : "";
+  const gfaNearbyPairs = [...gfaWindow.matchAll(/([\d,.]+)\s*㎡[\s\S]{0,260}?\(?([\d,.]+)\s*평\)?/gi)];
+  const gfaNearby = gfaNearbyPairs.length ? gfaNearbyPairs.reduce((best, item) => {
+    const bi = best.index ?? 0;
+    const ii = item.index ?? 0;
+    const labelInWindow = gfaLabelPos >= 0 ? Math.min(260, gfaLabelPos) : 0;
+    return Math.abs(ii - labelInWindow) < Math.abs(bi - labelInWindow) ? item : best;
+  }) : null;
+  const gfa = gfaInline ?? gfaNearby;
   const completion = joined.match(/준공년도\s+(\d{4})(?:년(?:\s*(\d{1,2})월)?)?/i);
   const scale = joined.match(/규모\s+(?:지하\s*)?B?(\d+)\s*\/\s*(?:지상\s*)?(\d+)F/i)
     ?? joined.match(/규모\s+B(\d+)\s*\/\s*(\d+)F/i);
@@ -338,10 +356,29 @@ function parseBuildingFacts(text: string, page: number) {
   const typicalLeaseNormal = joined.match(/기준층\s*임대면적\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\)/i);
   const typicalExclusiveNormal = joined.match(/기준층\s*전용면적\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\)/i);
   const interleaved = joined.match(/기준층\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\).*?임대면적\s+기준층\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\).*?전용면적/i);
-  const typicalLeaseSqm = typicalLeaseNormal?.[1] ?? interleaved?.[1] ?? null;
-  const typicalLeasePy = typicalLeaseNormal?.[2] ?? interleaved?.[2] ?? null;
-  const typicalExclusiveSqm = typicalExclusiveNormal?.[1] ?? interleaved?.[3] ?? null;
-  const typicalExclusivePy = typicalExclusiveNormal?.[2] ?? interleaved?.[4] ?? null;
+  const typicalLeaseRaw = text.match(/기준층\s+([\d,.]+)\s*㎡[\s\S]{0,180}?임대면적\s+\(([\d,.]+)\s*평\)/i);
+  const typicalExclusiveRaw = text.match(/기준층\s+([\d,.]+)\s*㎡[\s\S]{0,180}?전용면적\s+\(([\d,.]+)\s*평\)/i);
+
+  // 라벨과 평 값이 서로 다른 행에 배치된 CBRE 표(예: 그랑서울)를 line-aware 방식으로 보완합니다.
+  const rawLines = text.split(/\r?\n/);
+  const typicalByLines: Array<{ kind: "LEASE" | "EXCLUSIVE"; sqm: string; py: string }> = [];
+  for (let li = 0; li < rawLines.length; li += 1) {
+    const sqmMatch = rawLines[li].match(/기준층\s+([\d,.]+)\s*㎡/i);
+    if (!sqmMatch) continue;
+    for (let lj = li; lj <= Math.min(rawLines.length - 1, li + 4); lj += 1) {
+      const leasePy = rawLines[lj].match(/^\s*임대면적\s+\(([\d,.]+)\s*평\)/i);
+      const exclusivePy = rawLines[lj].match(/^\s*전용면적\s+\(([\d,.]+)\s*평\)/i);
+      if (leasePy) { typicalByLines.push({ kind: "LEASE", sqm: sqmMatch[1], py: leasePy[1] }); break; }
+      if (exclusivePy) { typicalByLines.push({ kind: "EXCLUSIVE", sqm: sqmMatch[1], py: exclusivePy[1] }); break; }
+    }
+  }
+  const typicalLeaseLine = typicalByLines.find((x) => x.kind === "LEASE") ?? null;
+  const typicalExclusiveLine = typicalByLines.find((x) => x.kind === "EXCLUSIVE") ?? null;
+
+  const typicalLeaseSqm = typicalLeaseNormal?.[1] ?? interleaved?.[1] ?? typicalLeaseRaw?.[1] ?? typicalLeaseLine?.sqm ?? null;
+  const typicalLeasePy = typicalLeaseNormal?.[2] ?? interleaved?.[2] ?? typicalLeaseRaw?.[2] ?? typicalLeaseLine?.py ?? null;
+  const typicalExclusiveSqm = typicalExclusiveNormal?.[1] ?? interleaved?.[3] ?? typicalExclusiveRaw?.[1] ?? typicalExclusiveLine?.sqm ?? null;
+  const typicalExclusivePy = typicalExclusiveNormal?.[2] ?? interleaved?.[4] ?? typicalExclusiveRaw?.[2] ?? typicalExclusiveLine?.py ?? null;
 
   return {
     road_address: f(address, address, page, address ? 0.92 : 0),

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import DeleteBuildingButton from "@/components/admin/DeleteBuildingButton";
 import {
   bulkGeneratePrimeScoreRecommendations,
@@ -30,12 +30,14 @@ type Row = {
 };
 
 type AutomationFilter = "all" | "ready" | "not_ready" | "stale" | "score_pending";
+const PAGE_SIZE = 50;
 
 export default function BuildingPublishManager({ buildings }: { buildings: Row[] }) {
   const [selected, setSelected] = useState<string[]>([]);
   const [visibility, setVisibility] = useState<"all" | "published" | "private">("all");
   const [automationFilter, setAutomationFilter] = useState<AutomationFilter>("all");
   const [keyword, setKeyword] = useState("");
+  const [page, setPage] = useState(1);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
@@ -60,21 +62,34 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
     });
   }, [buildings, visibility, automationFilter, keyword]);
 
-  const filteredIds = filtered.filter((b) => !b.deleted_at).map((b) => b.id);
-  const allFilteredSelected = filteredIds.length > 0 && filteredIds.every((id) => selected.includes(id));
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageRows = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const pageIds = pageRows.filter((b) => !b.deleted_at).map((b) => b.id);
+  const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.includes(id));
+
+  useEffect(() => { setPage(1); setSelected([]); }, [visibility, automationFilter, keyword]);
+  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
+
   const selectedRows = buildings.filter((b) => selected.includes(b.id));
   const selectedPublished = selectedRows.filter((b) => b.is_published).length;
   const selectedPrivate = selectedRows.filter((b) => !b.is_published).length;
 
-  const toggleAllFiltered = () => {
-    if (allFilteredSelected) setSelected((prev) => prev.filter((id) => !filteredIds.includes(id)));
-    else setSelected((prev) => Array.from(new Set([...prev, ...filteredIds])));
+  const togglePage = () => {
+    if (allPageSelected) setSelected((prev) => prev.filter((id) => !pageIds.includes(id)));
+    else setSelected((prev) => Array.from(new Set([...prev, ...pageIds])));
   };
 
-  const selectReady = () => {
-    const readyIds = filtered.filter((b) => b.ready_to_publish && !b.deleted_at).map((b) => b.id);
+  const selectReadyOnPage = () => {
+    const readyIds = pageRows.filter((b) => b.ready_to_publish && !b.deleted_at).map((b) => b.id);
     setSelected(readyIds);
-    setMessage(`공개 준비 완료 ${readyIds.length}개를 선택했습니다.`);
+    setMessage(`현재 페이지의 공개 준비 완료 ${readyIds.length}개를 선택했습니다.`);
+  };
+
+  const selectScorePendingOnPage = () => {
+    const ids = pageRows.filter((b) => !b.deleted_at && !b.has_score_recommendation && b.score_status !== "PUBLISHED").map((b) => b.id).slice(0, 50);
+    setSelected(ids);
+    setMessage(`현재 페이지의 Prime Score 추천 대기 ${ids.length}개를 선택했습니다.`);
   };
 
   const changeVisibility = (publish: boolean) => {
@@ -109,13 +124,14 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
 
   const generateScores = () => {
     if (selected.length === 0) return setMessage("Prime Score 추천을 생성할 건물을 선택해 주세요.");
-    if (selected.length > 50) return setMessage("Prime Score 추천은 한 번에 최대 50개씩 생성해 주세요.");
+    if (selected.length > 50) return setMessage("Prime Score 추천은 현재 페이지에서 최대 50개씩 처리해 주세요.");
     if (!confirm(`선택한 ${selected.length}개 건물의 Prime Score 추천값을 생성할까요?\n공식 공개 점수는 변경하지 않습니다.`)) return;
     setMessage(null);
     startTransition(async () => {
       const r = await bulkGeneratePrimeScoreRecommendations(selected);
       if (r.error) return setMessage(`오류: ${r.error}`);
       setMessage(`Prime Score 추천 생성 ${r.generated ?? 0}개${r.failed ? ` · 실패 ${r.failed}개` : ""}`);
+      setSelected([]);
       window.location.reload();
     });
   };
@@ -129,14 +145,12 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
         <button type="button" onClick={() => setAutomationFilter("score_pending")} className="border border-sky-200 bg-sky-50 p-4 text-left hover:border-sky-500"><p className="text-xs text-sky-800">Prime Score 추천 대기</p><p className="mt-1 font-display text-2xl text-sky-950">{summary.scorePending}</p><p className="mt-1 text-[11px] text-sky-700">추천값 미생성 건물</p></button>
       </div>
 
-      <div className="mb-4 border border-silver/30 bg-white p-4">
+      <div className="sticky top-0 z-20 mb-4 border border-silver/30 bg-white/95 p-4 shadow-sm backdrop-blur">
         <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-          <div>
-            <div className="font-medium text-charcoal">건물 자동화 센터</div>
-            <p className="mt-1 text-xs text-silver">공개 준비도 자동점검 → 준비완료 선택 → Prime Score 추천 → 안전 공개까지 한 화면에서 처리합니다.</p>
-          </div>
+          <div><div className="font-medium text-charcoal">건물 자동화 센터</div><p className="mt-1 text-xs text-silver">목록은 50개씩 나눠 표시합니다. 현재 페이지에서 선택하면 Prime Score 추천 한도와 정확히 맞습니다.</p></div>
           <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={selectReady} disabled={pending} className="border border-green-600 bg-green-50 px-3 py-2 text-xs text-green-800 disabled:opacity-40">공개 준비완료 자동선택</button>
+            <button type="button" onClick={selectReadyOnPage} disabled={pending} className="border border-green-600 bg-green-50 px-3 py-2 text-xs text-green-800 disabled:opacity-40">현재 페이지 준비완료 선택</button>
+            <button type="button" onClick={selectScorePendingOnPage} disabled={pending} className="border border-sky-600 bg-sky-50 px-3 py-2 text-xs text-sky-800 disabled:opacity-40">현재 페이지 Score 대기 선택</button>
             <button type="button" onClick={generateScores} disabled={pending || selected.length === 0} className="border border-sky-600 bg-sky-50 px-3 py-2 text-xs text-sky-800 disabled:opacity-40">선택 Prime Score 추천</button>
             <button type="button" onClick={publishReady} disabled={pending || selected.length === 0} className="bg-green-700 px-4 py-2 text-xs text-white disabled:opacity-40">준비완료만 안전 공개</button>
             <button type="button" onClick={() => changeVisibility(false)} disabled={pending || selected.length === 0} className="border border-silver/50 bg-white px-3 py-2 text-xs disabled:opacity-40">선택 비공개</button>
@@ -152,8 +166,9 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-silver">
-          <button type="button" onClick={toggleAllFiltered} className="underline underline-offset-2 text-navy">{allFilteredSelected ? "현재 목록 선택 해제" : `현재 목록 ${filteredIds.length}개 전체 선택`}</button>
+          <button type="button" onClick={togglePage} className="font-medium text-navy underline underline-offset-2">{allPageSelected ? "현재 페이지 선택 해제" : `현재 페이지 ${pageIds.length}개 전체 선택`}</button>
           <span>선택 {selected.length}개</span><span>공개 {selectedPublished}개</span><span>비공개 {selectedPrivate}개</span>
+          <span className="ml-auto">검색결과 {filtered.length}개 · {safePage}/{totalPages} 페이지</span>
           {automationFilter !== "all" && <button type="button" onClick={() => setAutomationFilter("all")} className="text-navy underline">자동화 필터 해제</button>}
           {pending && <span className="text-navy">처리 중...</span>}
         </div>
@@ -162,13 +177,13 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
 
       <div className="bg-white border border-silver/30 overflow-x-auto">
         <table className="w-full text-sm min-w-[1180px]">
-          <thead><tr className="text-left text-silver border-b border-silver/30">
-            <th className="px-3 py-3 font-normal w-10"><input type="checkbox" aria-label="현재 목록 전체 선택" checked={allFilteredSelected} onChange={toggleAllFiltered} /></th>
+          <thead><tr className="text-left text-silver border-b border-silver/30 bg-fog/60">
+            <th className="px-3 py-3 font-normal w-10"><input type="checkbox" aria-label="현재 페이지 전체 선택" checked={allPageSelected} onChange={togglePage} /></th>
             <th className="px-3 py-3 font-normal">건물명</th><th className="px-3 py-3 font-normal">지역</th><th className="px-3 py-3 font-normal">준공</th>
             <th className="px-3 py-3 font-normal">공개 준비도</th><th className="px-3 py-3 font-normal">데이터 최신성</th><th className="px-3 py-3 font-normal">Prime Score</th><th className="px-3 py-3 font-normal">공실</th><th className="px-3 py-3 font-normal">공개</th><th className="px-3 py-3 font-normal text-right">관리</th>
           </tr></thead>
-          <tbody>{filtered.map((b) => (
-            <tr key={b.id} className="border-b border-silver/20 last:border-0 align-top">
+          <tbody>{pageRows.map((b) => (
+            <tr key={b.id} className="border-b border-silver/20 last:border-0 align-top hover:bg-fog/35">
               <td className="px-3 py-3"><input type="checkbox" disabled={!!b.deleted_at} checked={selected.includes(b.id)} onChange={(e) => setSelected((prev) => e.target.checked ? Array.from(new Set([...prev, b.id])) : prev.filter((id) => id !== b.id))} /></td>
               <td className="px-3 py-3"><Link href={`/admin/buildings/${b.id}`} className="font-medium hover:underline">{b.name}</Link>{b.blockers.length > 0 && <p className="mt-1 max-w-[260px] text-[11px] text-amber-700">{b.blockers.join(" · ")}</p>}</td>
               <td className="px-3 py-3 text-silver">{b.district_name || "-"}</td><td className="px-3 py-3 text-silver">{b.completion_year ?? "-"}</td>
@@ -179,9 +194,18 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
               <td className="px-3 py-3"><span className={b.is_published ? "text-green-700 bg-green-50 px-2 py-0.5 text-xs border border-green-200" : "text-silver bg-fog px-2 py-0.5 text-xs border border-silver/30"}>{b.is_published ? "공개" : "비공개"}</span></td>
               <td className="px-3 py-3 text-right space-x-3"><Link href={`/admin/buildings/${b.id}`} className="text-navy hover:underline">수정</Link><DeleteBuildingButton id={b.id} name={b.name} deletedAt={b.deleted_at} /></td>
             </tr>
-          ))}{filtered.length === 0 && <tr><td colSpan={10} className="px-4 py-10 text-center text-silver">조건에 맞는 건물이 없습니다.</td></tr>}</tbody>
+          ))}{pageRows.length === 0 && <tr><td colSpan={10} className="px-4 py-10 text-center text-silver">조건에 맞는 건물이 없습니다.</td></tr>}</tbody>
         </table>
       </div>
+
+      {filtered.length > PAGE_SIZE && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border border-silver/25 bg-white px-4 py-3 text-sm">
+        <span className="text-xs text-silver">{(safePage-1)*PAGE_SIZE+1}–{Math.min(safePage*PAGE_SIZE, filtered.length)} / {filtered.length}개</span>
+        <div className="flex items-center gap-2">
+          <button type="button" disabled={safePage <= 1} onClick={() => { setPage((p) => Math.max(1,p-1)); setSelected([]); window.scrollTo({top:0,behavior:"smooth"}); }} className="border px-3 py-1.5 text-xs disabled:opacity-30">이전 50개</button>
+          <span className="min-w-[80px] text-center text-xs">{safePage} / {totalPages}</span>
+          <button type="button" disabled={safePage >= totalPages} onClick={() => { setPage((p) => Math.min(totalPages,p+1)); setSelected([]); window.scrollTo({top:0,behavior:"smooth"}); }} className="border px-3 py-1.5 text-xs disabled:opacity-30">다음 50개</button>
+        </div>
+      </div>}
     </>
   );
 }
