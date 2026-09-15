@@ -874,7 +874,11 @@ function parseFirstStation(accessText: string | null): { line_name: string | nul
  * 이미 매칭/등록된 canonical building에 "비어 있는 값만" 보강합니다.
  * 기존에 관리자가 입력한 값은 절대 덮어쓰지 않습니다.
  */
-export async function enrichCbreBuildingFacts(sourceDocumentId: string): Promise<{
+export async function enrichCbreBuildingFacts(
+  sourceDocumentId: string,
+  offset = 0,
+  limit = 12,
+): Promise<{
   error?: string;
   parsedBuildings?: number;
   matchedBuildings?: number;
@@ -882,6 +886,11 @@ export async function enrichCbreBuildingFacts(sourceDocumentId: string): Promise
   parkingUpdated?: number;
   transportAdded?: number;
   skipped?: number;
+  processedFrom?: number;
+  processedTo?: number;
+  totalBuildings?: number;
+  nextOffset?: number;
+  done?: boolean;
 }> {
   const { supabase, admin, error: authError } = await requireAdmin();
   if (!admin) return { error: authError ?? "관리자 권한이 없는 계정입니다." };
@@ -934,7 +943,13 @@ export async function enrichCbreBuildingFacts(sourceDocumentId: string): Promise
   let transportAdded = 0;
   let skipped = 0;
 
-  for (const pb of parsed.buildings) {
+  // Vercel server actions should stay short-lived. Process a small deterministic batch so
+  // 200+ buildings never turn into a single N+1 request burst / function timeout.
+  const safeOffset = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
+  const safeLimit = Number.isFinite(limit) ? Math.min(20, Math.max(1, Math.floor(limit))) : 12;
+  const batch = parsed.buildings.slice(safeOffset, safeOffset + safeLimit);
+
+  for (const pb of batch) {
     const pageCandidates = byPage.get(pb.primary_source_page) ?? [];
     let s = pageCandidates.find((x) => normalizeTitleForJoin(x.raw_building_name) === normalizeTitleForJoin(pb.raw_building_name));
     if (!s && pageCandidates.length === 1) s = pageCandidates[0];
@@ -1019,11 +1034,37 @@ export async function enrichCbreBuildingFacts(sourceDocumentId: string): Promise
     action: "ENRICH_CBRE_BUILDING_FACTS",
     entity_type: "source_document",
     entity_id: sourceDocumentId,
-    after_data: { parser_version: CBRE_PARSER_VERSION, parsed_buildings: parsed.buildings.length, matched_buildings: matchedBuildings, updated_buildings: updatedBuildings, parking_updated: parkingUpdated, transport_added: transportAdded, skipped },
+    after_data: {
+      parser_version: CBRE_PARSER_VERSION,
+      parsed_buildings: parsed.buildings.length,
+      processed_from: safeOffset,
+      processed_to: Math.min(safeOffset + batch.length, parsed.buildings.length),
+      matched_buildings: matchedBuildings,
+      updated_buildings: updatedBuildings,
+      parking_updated: parkingUpdated,
+      transport_added: transportAdded,
+      skipped,
+    },
   });
 
+  const nextOffset = Math.min(safeOffset + batch.length, parsed.buildings.length);
+  const done = nextOffset >= parsed.buildings.length;
   revalidatePath(`/admin/imports/${sourceDocumentId}`);
-  revalidatePath("/admin/buildings");
-  revalidatePath("/buildings");
-  return { parsedBuildings: parsed.buildings.length, matchedBuildings, updatedBuildings, parkingUpdated, transportAdded, skipped };
+  if (done) {
+    revalidatePath("/admin/buildings");
+    revalidatePath("/buildings");
+  }
+  return {
+    parsedBuildings: parsed.buildings.length,
+    matchedBuildings,
+    updatedBuildings,
+    parkingUpdated,
+    transportAdded,
+    skipped,
+    processedFrom: safeOffset,
+    processedTo: nextOffset,
+    totalBuildings: parsed.buildings.length,
+    nextOffset,
+    done,
+  };
 }
