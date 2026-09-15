@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import { createClient } from "@/lib/supabase/server";
 import { logPageView } from "@/lib/analytics";
 import ComparePicker from "@/components/ComparePicker";
+import FreshnessChip from "@/components/FreshnessChip";
 
 export const metadata: Metadata = {
   title: "프라임 오피스 찾기",
@@ -47,7 +48,7 @@ function formatRent(n: number | null | undefined) {
   return `${Number(n).toLocaleString("ko-KR")}원/평`;
 }
 
-export default async function BuildingsPage({ searchParams }: { searchParams: Promise<{ q?: string; district?: string; minYear?: string; minScore?: string; grade?: string; minAreaPy?: string; maxRentPerPy?: string; availableOnly?: string }> }) {
+export default async function BuildingsPage({ searchParams }: { searchParams: Promise<{ q?: string; district?: string; minYear?: string; minScore?: string; grade?: string; minAreaPy?: string; maxRentPerPy?: string; availableOnly?: string; sort?: string }> }) {
   const params = await searchParams;
   const supabase = await createClient();
 
@@ -82,10 +83,18 @@ export default async function BuildingsPage({ searchParams }: { searchParams: Pr
     buildings = buildings.filter((b) => activeListingsOf(b).some((l) => l.rent_per_py !== null && l.rent_per_py <= r));
   }
 
+  const sort = params.sort ?? "recommended";
+  const minRent = (b: RawBuilding) => { const xs=activeListingsOf(b).map(l=>l.rent_per_py).filter((v):v is number=>v!=null); return xs.length?Math.min(...xs):Number.POSITIVE_INFINITY; };
+  const minArea = (b: RawBuilding) => { const xs=activeListingsOf(b).map(l=>l.exclusive_area_py).filter((v):v is number=>v!=null); return xs.length?Math.min(...xs):Number.POSITIVE_INFINITY; };
+  if (sort === "rent") buildings.sort((a,b)=>minRent(a)-minRent(b));
+  if (sort === "area") buildings.sort((a,b)=>minArea(a)-minArea(b));
+  if (sort === "score") buildings.sort((a,b)=>(scoreOf(b)??-1)-(scoreOf(a)??-1));
+  if (sort === "latest") buildings.sort((a,b)=>String(b.data_last_verified_at??"").localeCompare(String(a.data_last_verified_at??"")));
+
   const hasFilters = Boolean(q || params.district || params.minYear || params.minScore || params.grade || params.minAreaPy || params.maxRentPerPy || params.availableOnly === "1");
 
   return (
-    <main className="min-h-screen bg-fog">
+    <main id="main-content" className="min-h-screen bg-fog">
       <section className="bg-navy px-6 py-14 text-white">
         <div className="mx-auto max-w-7xl">
           <p className="mb-2 text-xs uppercase tracking-[0.28em] text-silver">Prime Office Database</p>
@@ -132,9 +141,19 @@ export default async function BuildingsPage({ searchParams }: { searchParams: Pr
           </div>
         </form>
 
-        <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div><p className="text-sm text-charcoal"><b className="tabular-nums">{buildings.length}</b>개 건물</p>{hasFilters && <p className="mt-1 text-xs text-silver">현재 입력한 조건을 적용한 결과입니다.</p>}</div>
-          {buildings.length >= 2 && <ComparePicker items={buildings.map((b) => ({ id: b.id, name: b.name }))} />}
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <form method="get" className="flex items-center gap-2">
+              {Object.entries(params).filter(([k,v])=>k!=="sort" && v).map(([k,v])=><input key={k} type="hidden" name={k} value={String(v)} />)}
+              <label className="text-xs text-silver" htmlFor="sort">정렬</label>
+              <select id="sort" name="sort" defaultValue={sort} onChange={undefined} className="border border-silver/40 bg-white px-3 py-2 text-xs">
+                <option value="recommended">추천순</option><option value="latest">최근 확인순</option><option value="rent">임대료 낮은순</option><option value="area">면적 작은순</option><option value="score">Prime Score순</option>
+              </select>
+              <button className="border border-silver/40 bg-white px-3 py-2 text-xs">적용</button>
+            </form>
+            {buildings.length >= 2 && <ComparePicker items={buildings.map((b) => ({ id: b.id, name: b.name }))} />}
+          </div>
         </div>
 
         {buildings.length === 0 ? (
@@ -153,7 +172,7 @@ export default async function BuildingsPage({ searchParams }: { searchParams: Pr
                   <div className="relative h-48 overflow-hidden bg-fog">{img ? <img src={img} alt={b.name} className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]" /> : <div className="flex h-full items-center justify-center bg-gradient-to-br from-fog to-silver/20 text-xs tracking-[.18em] text-silver">CORE PRIME</div>}<span className={`absolute left-3 top-3 px-2.5 py-1 text-xs ${active.length ? "bg-navy text-white" : "bg-white/95 text-silver"}`}>{active.length ? `현재 공실 ${active.length}건` : "공실 문의"}</span></div>
                   <div className="p-5"><div className="flex items-center justify-between gap-3 text-xs text-silver"><span>{b.districts?.name ?? "권역 미정"}</span><span>{b.building_grade ?? "등급 미정"}</span></div><h2 className="mt-2 font-display text-xl kr-text">{b.name}</h2><p className="mt-2 min-h-[2.5rem] text-xs leading-5 text-silver kr-text">{b.road_address ?? b.address ?? "주소 정보 준비중"}</p>
                     <div className="mt-4 grid grid-cols-2 gap-2 border-t border-silver/20 pt-4 text-xs"><div><p className="text-silver">전용면적</p><p className="mt-1 font-medium">{areas.length ? `${Number(areas[0]).toLocaleString()}평부터` : "문의"}</p></div><div><p className="text-silver">평당 임대료</p><p className="mt-1 font-medium">{rents.length ? `${formatRent(rents[0])}부터` : "문의"}</p></div></div>
-                    <div className="mt-3 flex items-center justify-between text-[11px] text-silver"><span>{b.completion_year ? `${b.completion_year}년 준공` : "준공연도 미정"}</span><span>{score !== null ? `Prime Score ${score}` : "Prime Score 평가 준비중"}</span></div>{latestReport && <p className="mt-2 text-[11px] text-silver">공실 기준일 {latestReport}</p>}
+                    <div className="mt-3 flex items-center justify-between text-[11px] text-silver"><span>{b.completion_year ? `${b.completion_year}년 준공` : "준공연도 미정"}</span><span>{score !== null ? `Prime Score ${score}` : "Prime Score 평가 준비중"}</span></div><div className="mt-3 flex items-center justify-between gap-2">{latestReport && <span className="text-[11px] text-silver">공실 기준 {latestReport}</span>}<FreshnessChip date={latestReport ?? b.data_last_verified_at} /></div>
                   </div>
                 </Link>
               );

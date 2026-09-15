@@ -18,7 +18,7 @@ export default async function AdvisoryPage({ searchParams }: { searchParams: Pro
   const defaultNotes = building ? `관심 건물: ${building}` : undefined;
 
   return (
-    <main className="min-h-screen bg-fog">
+    <main id="main-content" className="min-h-screen bg-fog">
       <section className="bg-navy px-6 py-14 text-white">
         <div className="mx-auto max-w-4xl text-center">
           <p className="mb-3 text-xs uppercase tracking-[0.3em] text-silver">Office Advisory</p>

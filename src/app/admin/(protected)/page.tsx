@@ -7,7 +7,7 @@ export default async function AdminDashboardPage() {
 
   const [
     { count: totalBuildings }, { count: publishedBuildings }, { count: totalListings }, { count: activeListings },
-    { count: newInquiries }, { count: totalProposals }, { count: reviewImports }, { count: failedImports },
+    { count: newInquiries }, { count: totalProposals }, { count: reviewImports }, { count: failedImports }, { count: unverifiedBuildings },
   ] = await Promise.all([
     supabase.from("buildings").select("*", { count: "exact", head: true }).is("deleted_at", null),
     supabase.from("buildings").select("*", { count: "exact", head: true }).eq("is_published", true).is("deleted_at", null),
@@ -17,6 +17,7 @@ export default async function AdminDashboardPage() {
     supabase.from("proposals").select("*", { count: "exact", head: true }),
     supabase.from("source_documents").select("*", { count: "exact", head: true }).eq("status", "REVIEW_REQUIRED"),
     supabase.from("source_documents").select("*", { count: "exact", head: true }).eq("status", "FAILED"),
+    supabase.from("buildings").select("*", { count: "exact", head: true }).is("deleted_at", null).is("data_last_verified_at", null),
   ]);
 
   const [{ data: recentInquiries }, { data: reviewDocs }, { data: staleListings }] = await Promise.all([
@@ -46,6 +47,17 @@ export default async function AdminDashboardPage() {
       <div className="mb-8 grid grid-cols-2 gap-3 md:grid-cols-5">
         {cards.map((c) => <Link key={c.label} href={c.href} className="border border-silver/25 bg-white p-5 transition hover:border-navy hover:shadow-sm"><p className="text-xs text-silver">{c.label}</p><p className="mt-1 font-display text-3xl tabular-nums">{c.value}</p><p className="mt-2 text-[11px] text-silver">{c.sub}</p></Link>)}
       </div>
+
+      <section className="mb-8 border border-silver/25 bg-white p-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div><p className="text-xs uppercase tracking-[.18em] text-silver">Quality Control</p><h2 className="mt-1 text-lg font-medium">오늘 먼저 확인할 운영 품질</h2><p className="mt-1 text-xs leading-5 text-silver">공개보다 데이터 검증을 우선합니다. 미검증 건물과 자료 검수 대기를 먼저 처리하세요.</p></div>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <Link href="/admin/buildings" className="border border-silver/25 px-4 py-3 hover:border-navy"><p className="text-[10px] text-silver">비공개 건물</p><p className="mt-1 text-xl font-display">{Math.max(0,(totalBuildings??0)-(publishedBuildings??0))}</p></Link>
+            <Link href="/admin/buildings" className="border border-silver/25 px-4 py-3 hover:border-navy"><p className="text-[10px] text-silver">검증일 없음</p><p className="mt-1 text-xl font-display">{unverifiedBuildings ?? 0}</p></Link>
+            <Link href="/admin/imports" className="border border-silver/25 px-4 py-3 hover:border-navy"><p className="text-[10px] text-silver">자료 검수</p><p className="mt-1 text-xl font-display">{(reviewImports??0)+(failedImports??0)}</p></Link>
+          </div>
+        </div>
+      </section>
 
       <div className="mb-8 grid gap-3 md:grid-cols-4">
         <Link href="/admin/imports/new" className="bg-navy p-4 text-white hover:bg-charcoal"><p className="text-[10px] uppercase tracking-[.16em] text-silver">01 Data</p><p className="mt-1 text-sm">PDF 자료 등록</p></Link>

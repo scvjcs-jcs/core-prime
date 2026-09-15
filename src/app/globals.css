@@ -37,3 +37,37 @@ button { cursor: pointer; }
 button:disabled { cursor: not-allowed; }
 
 .tabular-nums { font-variant-numeric: tabular-nums; }
+
+.skip-link {
+  position: fixed;
+  left: 1rem;
+  top: -4rem;
+  z-index: 100;
+  background: #ffffff;
+  color: #0d1b30;
+  border: 1px solid #0d1b30;
+  padding: .65rem .9rem;
+  font-size: .875rem;
+  transition: top .15s ease;
+}
+.skip-link:focus { top: 1rem; }
+
+.data-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  border: 1px solid rgba(154, 161, 171, .32);
+  background: #fff;
+  padding: .32rem .55rem;
+  font-size: .7rem;
+  line-height: 1;
+  color: #5f6670;
+}
+
+.data-chip--fresh { border-color: rgba(13, 27, 48, .28); color: #0d1b30; }
+
+.metric-card {
+  border: 1px solid rgba(154, 161, 171, .25);
+  background: #fff;
+  padding: 1rem;
+}

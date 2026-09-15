@@ -4,6 +4,8 @@ import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { LISTING_STATUS_LABEL } from "@/lib/labels";
 import { logPageView } from "@/lib/analytics";
+import FreshnessChip from "@/components/FreshnessChip";
+import { rangeLabel } from "@/lib/publicData";
 
 async function getBuilding(slug: string) {
   const supabase = await createClient();
@@ -110,6 +112,10 @@ export default async function BuildingDetailPage({
   // 중복 집계될 수 있으므로, 조회 기록은 반드시 이 페이지 컴포넌트에서만 남깁니다.
   await logPageView(`/buildings/${slug}`, building.id);
 
+  const areaRange = rangeLabel(listings.map((l) => l.exclusive_area_py), "평");
+  const rentRange = rangeLabel(listings.map((l) => l.rent_per_py), "원/평");
+  const latestListingDate = listings.map((l) => l.report_date ?? l.verified_at).filter((v): v is string => Boolean(v)).sort().at(-1) ?? building.data_last_verified_at;
+
   const jsonLd = {
     "@context": "https://schema.org",
     "@type": "RealEstateListing",
@@ -120,7 +126,7 @@ export default async function BuildingDetailPage({
   };
 
   return (
-    <main className="min-h-screen bg-white">
+    <main id="main-content" className="min-h-screen bg-white">
       {/* eslint-disable-next-line react/no-danger */}
       <script
         type="application/ld+json"
@@ -142,6 +148,15 @@ export default async function BuildingDetailPage({
           </div>
         </div>
       </div>
+
+      <section className="border-b border-silver/20 bg-fog">
+        <div className="mx-auto grid max-w-5xl grid-cols-2 gap-px bg-silver/20 md:grid-cols-4">
+          <div className="bg-white p-4"><p className="text-[11px] text-silver">현재 공개 공실</p><p className="mt-1 font-display text-2xl">{listings.length}건</p></div>
+          <div className="bg-white p-4"><p className="text-[11px] text-silver">전용면적 범위</p><p className="mt-1 text-sm font-medium">{areaRange ?? "문의"}</p></div>
+          <div className="bg-white p-4"><p className="text-[11px] text-silver">평당 임대료</p><p className="mt-1 text-sm font-medium">{rentRange ?? "문의"}</p></div>
+          <div className="bg-white p-4"><p className="mb-2 text-[11px] text-silver">데이터 최신성</p><FreshnessChip date={latestListingDate} /></div>
+        </div>
+      </section>
 
       {images.length > 1 && (
         <div className="max-w-5xl mx-auto px-6 py-6 grid grid-cols-3 md:grid-cols-5 gap-2">
@@ -253,7 +268,7 @@ export default async function BuildingDetailPage({
           )}
         </div>
 
-        <aside>
+        <aside className="md:sticky md:top-24 md:self-start">
           {/* Prime Score는 status가 PUBLISHED(공개)일 때만 고객에게 보여줍니다. */}
           {scores && scores.status === "PUBLISHED" && (
             <div className="bg-navy text-white p-6">
