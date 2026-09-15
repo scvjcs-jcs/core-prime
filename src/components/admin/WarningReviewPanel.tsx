@@ -3,78 +3,28 @@
 import { useMemo, useState } from "react";
 import { getSignedPdfUrl } from "@/app/admin/(protected)/imports/actions";
 
-type WarningRow = {
-  id: string;
-  scope: "BUILDING" | "LISTING";
-  buildingName: string;
-  floor: string | null;
-  page: number | null;
-  reason: string;
-};
+type WarningRow = { id:string; scope:"BUILDING"|"LISTING"; buildingName:string; floor:string|null; page:number|null; reason:string };
+type Severity = "확인필요"|"주의"|"참고";
+const PAGE_SIZE=50;
 
-function categoryOf(reason: string) {
-  const r = reason.toLowerCase();
-  if (/area|면적|exclusive|gross/.test(r)) return "면적";
-  if (/rent|임대료|maintenance|관리비|금액|단가/.test(r)) return "금액";
-  if (/move|입주|시기/.test(r)) return "입주시기";
-  if (/fallback|평탄화|구조화|표/.test(r)) return "표 인식";
-  if (/building|건물명|비정상/.test(r)) return "건물명";
-  return "기타";
-}
+function categoryOf(reason:string){const r=reason.toLowerCase();if(/area|면적|exclusive|gross/.test(r))return"면적";if(/rent|임대료|maintenance|관리비|금액|단가|보증금/.test(r))return"금액";if(/move|입주|시기/.test(r))return"입주시기";if(/fallback|평탄화|구조화|표|stream|parser/.test(r))return"표 인식";if(/building|건물명|비정상/.test(r))return"건물명";if(/vacancy|공실 없음|공실없음|no vacancy/.test(r))return"공실상태";return"기타"}
+function severityOf(reason:string):Severity{const r=reason.toLowerCase();if(/fallback|평탄화|stream|parser|층 범위 유지|range preserved|공실 없음|공실없음|no vacancy/.test(r))return"참고";if(/입주시기|move|completion|준공/.test(r))return"주의";return"확인필요"}
+function friendlyReason(reason:string){const map:Record<string,string>={AMBIGUOUS_AREA_LAYOUT:"임대면적/전용면적 표 구조가 모호해 원본 확인이 필요합니다.",EXCLUSIVE_AREA_GT_GROSS_AREA:"전용면적이 임대면적보다 크게 인식되었습니다.",INVALID_COMPLETION_YEAR:"준공연도가 정상 범위를 벗어납니다."};return map[reason]??reason}
+function groupKey(row:WarningRow){return `${categoryOf(row.reason)}::${friendlyReason(row.reason)}`}
 
-function friendlyReason(reason: string) {
-  const map: Record<string, string> = {
-    AMBIGUOUS_AREA_LAYOUT: "임대면적/전용면적 표 구조가 모호해 원본 확인이 필요합니다.",
-    EXCLUSIVE_AREA_GT_GROSS_AREA: "전용면적이 임대면적보다 크게 인식되었습니다.",
-    INVALID_COMPLETION_YEAR: "준공연도가 정상 범위를 벗어납니다.",
-  };
-  return map[reason] ?? reason;
-}
-
-export default function WarningReviewPanel({ sourceDocumentId, warnings, expectedCount }: { sourceDocumentId: string; warnings: WarningRow[]; expectedCount: number }) {
-  const [filter, setFilter] = useState("전체");
-  const [query, setQuery] = useState("");
-  const [opening, setOpening] = useState<string | null>(null);
-  const cats = useMemo(() => ["전체", ...Array.from(new Set(warnings.map((w) => categoryOf(w.reason))))], [warnings]);
-  const filtered = useMemo(() => warnings.filter((w) => {
-    const categoryOk = filter === "전체" || categoryOf(w.reason) === filter;
-    const q = query.trim().toLowerCase();
-    const textOk = !q || `${w.buildingName} ${w.floor ?? ""} ${w.reason}`.toLowerCase().includes(q);
-    return categoryOk && textOk;
-  }), [warnings, filter, query]);
-
-  async function openPage(row: WarningRow) {
-    setOpening(row.id);
-    const r = await getSignedPdfUrl(sourceDocumentId);
-    setOpening(null);
-    if (r.error || !r.url) { alert(r.error || "원본 PDF를 열 수 없습니다."); return; }
-    const url = row.page ? `${r.url}#page=${row.page}` : r.url;
-    window.open(url, "_blank", "noopener,noreferrer");
-  }
-
-  return <section id="warning-review" className="mb-5 scroll-mt-6 border border-amber-300 bg-amber-50/60 p-5">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div>
-        <p className="text-xs uppercase tracking-[.16em] text-amber-700">Warning Review</p>
-        <h2 className="mt-1 font-medium">검토 경고 {expectedCount}개</h2>
-        <p className="mt-1 text-xs leading-5 text-amber-900">경고 사유와 원본 PDF 페이지를 확인한 뒤 최종 승인하세요. 경고는 자동 오류가 아니라 ‘사람이 한 번 확인하면 좋은 항목’입니다.</p>
-      </div>
-      <div className="text-right text-xs text-amber-800"><b>{warnings.length}</b>개 상세 경고 표시</div>
-    </div>
-
-    {warnings.length !== expectedCount && <p className="mt-3 border border-amber-300 bg-white p-2 text-xs text-amber-800">집계 경고 {expectedCount}개 중 현재 Staging에서 상세 사유를 확인할 수 있는 경고는 {warnings.length}개입니다. 집계값에는 건물/공실 외 파서 전역 경고가 포함될 수 있습니다.</p>}
-
-    <div className="mt-4 flex flex-wrap gap-2">
-      {cats.map((c) => <button key={c} onClick={() => setFilter(c)} className={`border px-3 py-1.5 text-xs ${filter===c ? "border-amber-700 bg-amber-700 text-white" : "border-amber-300 bg-white text-amber-900"}`}>{c}{c!=="전체" ? ` ${warnings.filter((w)=>categoryOf(w.reason)===c).length}` : ` ${warnings.length}`}</button>)}
-      <input value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="건물명·층·경고 검색" className="min-w-[220px] flex-1 border border-amber-300 bg-white px-3 py-1.5 text-xs outline-none" />
-    </div>
-
-    <div className="mt-4 max-h-[650px] overflow-auto border border-amber-200 bg-white">
-      <table className="min-w-[900px] w-full text-left text-xs">
-        <thead className="sticky top-0 bg-amber-50"><tr><th className="px-3 py-2">구분</th><th className="px-3 py-2">건물</th><th className="px-3 py-2">층</th><th className="px-3 py-2">경고 사유</th><th className="px-3 py-2">PDF 페이지</th><th className="px-3 py-2">원본</th></tr></thead>
-        <tbody>{filtered.map((w)=><tr key={w.id} className="border-t border-amber-100 align-top"><td className="px-3 py-2"><span className="border border-amber-200 bg-amber-50 px-2 py-1">{w.scope === "BUILDING" ? "건물" : "공실"}</span></td><td className="px-3 py-2 font-medium">{w.buildingName}</td><td className="px-3 py-2">{w.floor ?? "-"}</td><td className="px-3 py-2"><div>{friendlyReason(w.reason)}</div>{friendlyReason(w.reason)!==w.reason&&<div className="mt-1 text-[10px] text-silver">원문 코드: {w.reason}</div>}</td><td className="px-3 py-2 tabular-nums">{w.page ? `p.${w.page}` : "-"}</td><td className="px-3 py-2"><button onClick={()=>openPage(w)} disabled={opening===w.id} className="border border-navy px-2 py-1 text-navy disabled:opacity-40">{opening===w.id ? "여는 중" : w.page ? "원본 페이지 보기" : "원본 PDF 보기"}</button></td></tr>)}</tbody>
-      </table>
-      {filtered.length===0&&<p className="p-6 text-center text-xs text-silver">조건에 맞는 경고가 없습니다.</p>}
-    </div>
-  </section>;
+export default function WarningReviewPanel({sourceDocumentId,warnings,expectedCount}:{sourceDocumentId:string;warnings:WarningRow[];expectedCount:number}){
+ const[filter,setFilter]=useState("전체"),[severity,setSeverity]=useState("전체"),[query,setQuery]=useState(""),[opening,setOpening]=useState<string|null>(null),[page,setPage]=useState(1),[grouped,setGrouped]=useState(true);
+ const cats=useMemo(()=>["전체",...Array.from(new Set(warnings.map(w=>categoryOf(w.reason))))],[warnings]);
+ const filtered=useMemo(()=>warnings.filter(w=>{const q=query.trim().toLowerCase();return(filter==="전체"||categoryOf(w.reason)===filter)&&(severity==="전체"||severityOf(w.reason)===severity)&&(!q||`${w.buildingName} ${w.floor??""} ${w.reason}`.toLowerCase().includes(q))}),[warnings,filter,severity,query]);
+ const groups=useMemo(()=>{const m=new Map<string,WarningRow[]>();for(const row of filtered){const k=groupKey(row);m.set(k,[...(m.get(k)??[]),row])}return Array.from(m.entries()).sort((a,b)=>b[1].length-a[1].length)},[filtered]);
+ const totalPages=Math.max(1,Math.ceil(filtered.length/PAGE_SIZE)),safePage=Math.min(page,totalPages),pageRows=filtered.slice((safePage-1)*PAGE_SIZE,safePage*PAGE_SIZE);
+ const counts={critical:warnings.filter(w=>severityOf(w.reason)==="확인필요").length,caution:warnings.filter(w=>severityOf(w.reason)==="주의").length,info:warnings.filter(w=>severityOf(w.reason)==="참고").length};
+ function reset(){setPage(1)}
+ async function openPage(row:WarningRow){setOpening(row.id);const r=await getSignedPdfUrl(sourceDocumentId);setOpening(null);if(r.error||!r.url){alert(r.error||"원본 PDF를 열 수 없습니다.");return}window.open(row.page?`${r.url}#page=${row.page}`:r.url,"_blank","noopener,noreferrer")}
+ return <section id="warning-review" className="mb-5 scroll-mt-6 border border-amber-300 bg-amber-50/60 p-5">
+  <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs uppercase tracking-[.16em] text-amber-700">Warning Review</p><h2 className="mt-1 font-medium">검토 경고 {expectedCount}개</h2><p className="mt-1 text-xs leading-5 text-amber-900">실제 오류 가능성이 높은 항목과 참고성 파서 안내를 분리해서 봅니다. ‘확인필요’를 먼저 검수하세요.</p></div><div className="grid grid-cols-3 gap-2 text-center text-xs"><button onClick={()=>{setSeverity("확인필요");reset()}} className="border border-red-200 bg-white px-3 py-2"><b className="text-red-700">{counts.critical}</b><div>확인필요</div></button><button onClick={()=>{setSeverity("주의");reset()}} className="border border-amber-200 bg-white px-3 py-2"><b>{counts.caution}</b><div>주의</div></button><button onClick={()=>{setSeverity("참고");reset()}} className="border border-slate-200 bg-white px-3 py-2"><b>{counts.info}</b><div>참고</div></button></div></div>
+  {warnings.length!==expectedCount&&<p className="mt-3 border border-amber-300 bg-white p-2 text-xs text-amber-800">집계 경고 {expectedCount}개 중 상세 사유 확인 가능 {warnings.length}개입니다. 집계값에는 파서 전역 경고가 포함될 수 있습니다.</p>}
+  <div className="sticky top-0 z-10 -mx-2 mt-4 flex flex-wrap items-center gap-2 border-y border-amber-200 bg-amber-50/95 px-2 py-2 backdrop-blur">{cats.map(c=><button key={c} onClick={()=>{setFilter(c);reset()}} className={`border px-3 py-1.5 text-xs ${filter===c?"border-amber-700 bg-amber-700 text-white":"border-amber-300 bg-white text-amber-900"}`}>{c}</button>)}<select value={severity} onChange={e=>{setSeverity(e.target.value);reset()}} className="border border-amber-300 bg-white px-3 py-1.5 text-xs">{["전체","확인필요","주의","참고"].map(s=><option key={s}>{s}</option>)}</select><input value={query} onChange={e=>{setQuery(e.target.value);reset()}} placeholder="건물명·층·경고 검색" className="min-w-[220px] flex-1 border border-amber-300 bg-white px-3 py-1.5 text-xs outline-none"/><button onClick={()=>setGrouped(v=>!v)} className="border border-amber-300 bg-white px-3 py-1.5 text-xs">{grouped?"개별 목록 보기":"유형별 묶어 보기"}</button></div>
+  {grouped?<div className="mt-4 space-y-2">{groups.map(([key,rows])=>{const first=rows[0];return <details key={key} className="border border-amber-200 bg-white"><summary className="cursor-pointer list-none p-3"><div className="flex flex-wrap items-center justify-between gap-3"><div><span className="mr-2 inline-block border px-2 py-0.5 text-[10px]">{severityOf(first.reason)}</span><b>{categoryOf(first.reason)}</b><span className="ml-2 text-xs">{friendlyReason(first.reason)}</span></div><span className="text-xs font-medium">{rows.length}건</span></div></summary><div className="border-t border-amber-100 p-2"><div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">{rows.slice(0,50).map(w=><button key={w.id} onClick={()=>openPage(w)} className="flex items-center justify-between border bg-white px-3 py-2 text-left text-xs hover:bg-amber-50"><span><b>{w.buildingName}</b> {w.floor??""}</span><span className="text-silver">{w.page?`p.${w.page}`:"PDF"}</span></button>)}</div>{rows.length>50&&<p className="mt-2 text-[11px] text-silver">{rows.length}건 전체는 ‘개별 목록 보기’에서 확인하세요.</p>}</div></details>})}{groups.length===0&&<p className="border bg-white p-6 text-center text-xs text-silver">조건에 맞는 경고가 없습니다.</p>}</div>:<><div className="mt-4 overflow-auto border border-amber-200 bg-white"><table className="min-w-[980px] w-full text-left text-xs"><thead className="sticky top-0 bg-amber-50"><tr><th className="px-3 py-2">위험도</th><th className="px-3 py-2">구분</th><th className="px-3 py-2">건물</th><th className="px-3 py-2">층</th><th className="px-3 py-2">경고 사유</th><th className="px-3 py-2">PDF</th><th className="px-3 py-2">원본</th></tr></thead><tbody>{pageRows.map(w=><tr key={w.id} className="border-t border-amber-100"><td className="px-3 py-2">{severityOf(w.reason)}</td><td className="px-3 py-2">{w.scope==="BUILDING"?"건물":"공실"}</td><td className="px-3 py-2 font-medium">{w.buildingName}</td><td className="px-3 py-2">{w.floor??"-"}</td><td className="px-3 py-2">{friendlyReason(w.reason)}</td><td className="px-3 py-2">{w.page?`p.${w.page}`:"-"}</td><td className="px-3 py-2"><button onClick={()=>openPage(w)} disabled={opening===w.id} className="border border-navy px-2 py-1 text-navy disabled:opacity-40">{opening===w.id?"여는 중":"원본 보기"}</button></td></tr>)}</tbody></table></div><div className="mt-3 flex items-center justify-between text-xs"><span>{filtered.length}건 · {safePage}/{totalPages} 페이지</span><div className="flex gap-2"><button disabled={safePage<=1} onClick={()=>setPage(p=>Math.max(1,p-1))} className="border px-3 py-1.5 disabled:opacity-30">이전</button><button disabled={safePage>=totalPages} onClick={()=>setPage(p=>Math.min(totalPages,p+1))} className="border px-3 py-1.5 disabled:opacity-30">다음</button></div></div></>}
+ </section>
 }
