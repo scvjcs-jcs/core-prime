@@ -11,7 +11,7 @@ export default async function EditBuildingPage({
   const { id } = await params;
   const supabase = await createClient();
 
-  const [{ data: districts }, { data: building }, { data: parking }, { data: scores }, { data: transportation }, { data: images }, { data: contents }] =
+  const [{ data: districts }, { data: building }, { data: parking }, { data: scores }, { data: transportation }, { data: images }, { data: contents }, { data: scoreRecommendation }] =
     await Promise.all([
       supabase.from("districts").select("id, name").order("name"),
       supabase.from("buildings").select("*").eq("id", id).maybeSingle(),
@@ -24,6 +24,11 @@ export default async function EditBuildingPage({
         .select("*")
         .eq("building_id", id)
         .order("created_at", { ascending: false }),
+      supabase
+        .from("prime_score_recommendations")
+        .select("*")
+        .eq("building_id", id)
+        .maybeSingle(),
     ]);
 
   if (!building) {
@@ -41,6 +46,7 @@ export default async function EditBuildingPage({
     },
     info: {
       completion_year: building.completion_year,
+      completion_month: building.completion_month ?? null,
       basement_floors: building.basement_floors,
       above_ground_floors: building.above_ground_floors,
       gross_floor_area: building.gross_floor_area,
@@ -48,7 +54,12 @@ export default async function EditBuildingPage({
       building_area: building.building_area,
       efficiency_ratio: building.efficiency_ratio,
       elevator_count: building.elevator_count,
+      elevator_detail: building.elevator_detail ?? "",
       freight_elevator_count: building.freight_elevator_count,
+      typical_floor_leasable_area_sqm: building.typical_floor_leasable_area_sqm ?? null,
+      typical_floor_leasable_area_py: building.typical_floor_leasable_area_py ?? null,
+      typical_floor_exclusive_area_sqm: building.typical_floor_exclusive_area_sqm ?? null,
+      typical_floor_exclusive_area_py: building.typical_floor_exclusive_area_py ?? null,
       building_use: building.building_use ?? "",
       hvac_type: building.hvac_type ?? "",
       hvac_hours: building.hvac_hours ?? "",
@@ -82,6 +93,8 @@ export default async function EditBuildingPage({
       mechanical_parking: parking?.mechanical_parking ?? false,
       ev_charging: parking?.ev_charging ?? false,
       operating_hours: parking?.operating_hours ?? "",
+      free_parking_text: parking?.free_parking_text ?? "",
+      paid_parking_text: parking?.paid_parking_text ?? "",
       description: parking?.description ?? "",
     },
     scores: {
@@ -114,6 +127,7 @@ export default async function EditBuildingPage({
         initialImages={images ?? []}
         initialContents={contents ?? []}
         initialDataVerifiedAt={building.data_last_verified_at}
+        initialScoreRecommendation={scoreRecommendation ?? null}
       />
     </div>
   );

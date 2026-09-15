@@ -165,7 +165,7 @@ export default async function BuildingDetailPage({
             </h2>
             <dl className="grid grid-cols-2 gap-y-3 text-sm">
               <dt className="text-silver">준공연도</dt>
-              <dd>{building.completion_year ?? "-"}</dd>
+              <dd>{building.completion_year ? `${building.completion_year}년${building.completion_month ? ` ${building.completion_month}월` : ""}` : "-"}</dd>
               <dt className="text-silver">규모</dt>
               <dd>
                 지하 {building.basement_floors ?? "-"}층 / 지상 {building.above_ground_floors ?? "-"}층
@@ -176,6 +176,12 @@ export default async function BuildingDetailPage({
               <dd>{building.efficiency_ratio ? `${building.efficiency_ratio}%` : "-"}</dd>
               <dt className="text-silver">건물 등급</dt>
               <dd>{building.building_grade ?? "-"}</dd>
+              <dt className="text-silver">엘리베이터</dt>
+              <dd>{building.elevator_count ? `${building.elevator_count}대${building.elevator_detail ? ` · ${building.elevator_detail}` : ""}` : building.elevator_detail ?? "-"}</dd>
+              <dt className="text-silver">기준층 임대면적</dt>
+              <dd>{building.typical_floor_leasable_area_py ? `${Number(building.typical_floor_leasable_area_py).toLocaleString()}평` : building.typical_floor_leasable_area_sqm ? `${Number(building.typical_floor_leasable_area_sqm).toLocaleString()}㎡` : "-"}</dd>
+              <dt className="text-silver">기준층 전용면적</dt>
+              <dd>{building.typical_floor_exclusive_area_py ? `${Number(building.typical_floor_exclusive_area_py).toLocaleString()}평` : building.typical_floor_exclusive_area_sqm ? `${Number(building.typical_floor_exclusive_area_sqm).toLocaleString()}㎡` : "-"}</dd>
               <dt className="text-silver">건물 용도</dt>
               <dd>{building.building_use ?? "-"}</dd>
             </dl>
@@ -236,8 +242,10 @@ export default async function BuildingDetailPage({
               <dl className="grid grid-cols-2 gap-y-3 text-sm">
                 <dt className="text-silver">총 주차대수</dt>
                 <dd>{parking.total_spaces ?? "-"}대</dd>
-                <dt className="text-silver">월 주차비</dt>
-                <dd>{parking.monthly_fee ? `${parking.monthly_fee.toLocaleString()}원` : "-"}</dd>
+                <dt className="text-silver">무료주차</dt>
+                <dd>{parking.free_parking_text ?? "-"}</dd>
+                <dt className="text-silver">유료주차</dt>
+                <dd>{parking.paid_parking_text ?? (parking.monthly_fee ? `${parking.monthly_fee.toLocaleString()}원` : "-")}</dd>
                 <dt className="text-silver">전기차 충전</dt>
                 <dd>{parking.ev_charging ? "가능" : "-"}</dd>
               </dl>

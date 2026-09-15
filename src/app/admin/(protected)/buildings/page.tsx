@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
-import DeleteBuildingButton from "@/components/admin/DeleteBuildingButton";
+import BuildingPublishManager from "@/components/admin/BuildingPublishManager";
+import { getBuildingReadiness } from "@/lib/buildingAutomation";
 
 const FILTERS = [
   { key: "active", label: "정상" },
@@ -22,117 +23,94 @@ export default async function AdminBuildingsPage({
 
   let query = supabase
     .from("buildings")
-    .select("id, name, status, is_published, completion_year, created_at, deleted_at, districts(name)")
+    .select("id, name, status, is_published, completion_year, gross_floor_area, above_ground_floors, basement_floors, elevator_count, efficiency_ratio, road_address, address, data_last_verified_at, created_at, deleted_at, districts(name)")
     .order("created_at", { ascending: false });
 
-  if (filter === "active") {
-    query = query.is("deleted_at", null);
-  } else if (filter === "deleted") {
-    query = query.not("deleted_at", "is", null);
-  }
+  if (filter === "active") query = query.is("deleted_at", null);
+  else if (filter === "deleted") query = query.not("deleted_at", "is", null);
 
   const { data: buildings, error } = await query;
+  const ids = (buildings ?? []).map((b) => b.id);
+
+  const [parkingRes, transportRes, imagesRes, listingsRes, scoresRes, recsRes] = ids.length
+    ? await Promise.all([
+        supabase.from("building_parking").select("building_id,total_spaces").in("building_id", ids),
+        supabase.from("building_transportation").select("building_id").in("building_id", ids),
+        supabase.from("building_images").select("building_id").in("building_id", ids),
+        supabase.from("listings").select("building_id").in("building_id", ids).in("status", ["available", "negotiating"]),
+        supabase.from("building_scores").select("building_id,status").in("building_id", ids),
+        supabase.from("prime_score_recommendations").select("building_id").in("building_id", ids),
+      ])
+    : [{ data: [] }, { data: [] }, { data: [] }, { data: [] }, { data: [] }, { data: [] }] as any;
+
+  const parking = new Map((parkingRes.data ?? []).map((x: any) => [x.building_id, x.total_spaces]));
+  const transportCount = new Map<string, number>();
+  for (const x of transportRes.data ?? []) transportCount.set(x.building_id, (transportCount.get(x.building_id) ?? 0) + 1);
+  const imageCount = new Map<string, number>();
+  for (const x of imagesRes.data ?? []) imageCount.set(x.building_id, (imageCount.get(x.building_id) ?? 0) + 1);
+  const listingCount = new Map<string, number>();
+  for (const x of listingsRes.data ?? []) listingCount.set(x.building_id, (listingCount.get(x.building_id) ?? 0) + 1);
+  const scoreStatus = new Map((scoresRes.data ?? []).map((x: any) => [x.building_id, x.status]));
+  const recommendationIds = new Set((recsRes.data ?? []).map((x: any) => x.building_id));
+
+  const rows = (buildings ?? []).map((b) => {
+    const readiness = getBuildingReadiness({
+      name: b.name,
+      road_address: b.road_address,
+      address: b.address,
+      completion_year: b.completion_year,
+      gross_floor_area: b.gross_floor_area == null ? null : Number(b.gross_floor_area),
+      above_ground_floors: b.above_ground_floors,
+      basement_floors: b.basement_floors,
+      elevator_count: b.elevator_count,
+      efficiency_ratio: b.efficiency_ratio == null ? null : Number(b.efficiency_ratio),
+      data_last_verified_at: b.data_last_verified_at,
+      parking_total: parking.get(b.id) ?? null,
+      transportation_count: transportCount.get(b.id) ?? 0,
+      image_count: imageCount.get(b.id) ?? 0,
+      active_listing_count: listingCount.get(b.id) ?? 0,
+      score_status: scoreStatus.get(b.id) ?? null,
+      has_score_recommendation: recommendationIds.has(b.id),
+    });
+    return {
+      id: b.id,
+      name: b.name,
+      status: b.status,
+      is_published: b.is_published,
+      completion_year: b.completion_year,
+      created_at: b.created_at,
+      deleted_at: b.deleted_at,
+      district_name: (b.districts as unknown as { name: string } | null)?.name ?? "",
+      readiness_score: readiness.score,
+      ready_to_publish: readiness.ready,
+      blockers: readiness.blockers,
+      warnings: readiness.warnings,
+      freshness: readiness.freshness,
+      freshness_label: readiness.freshnessLabel,
+      has_score_recommendation: recommendationIds.has(b.id),
+      score_status: scoreStatus.get(b.id) ?? null,
+      active_listing_count: listingCount.get(b.id) ?? 0,
+    };
+  });
 
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="font-display text-2xl">건물 관리</h1>
-        <Link
-          href="/admin/buildings/new"
-          className="text-sm bg-navy text-white px-4 py-2 hover:bg-charcoal transition-colors"
-        >
-          + 건물 등록
-        </Link>
+        <div>
+          <h1 className="font-display text-2xl">건물 관리</h1>
+          <p className="mt-1 text-xs text-silver">공개 준비도·데이터 최신성·Prime Score 추천 상태까지 자동 점검합니다.</p>
+        </div>
+        <Link href="/admin/buildings/new" className="text-sm bg-navy text-white px-4 py-2 hover:bg-charcoal transition-colors">+ 건물 등록</Link>
       </div>
 
       <div className="flex gap-2 mb-5">
         {FILTERS.map((f) => (
-          <Link
-            key={f.key}
-            href={f.key === "active" ? "/admin/buildings" : `/admin/buildings?filter=${f.key}`}
-            className={`text-xs px-3 py-1.5 border transition-colors ${
-              filter === f.key
-                ? "bg-navy text-white border-navy"
-                : "border-silver/40 text-silver hover:text-charcoal"
-            }`}
-          >
-            {f.label}
-          </Link>
+          <Link key={f.key} href={f.key === "active" ? "/admin/buildings" : `/admin/buildings?filter=${f.key}`} className={`text-xs px-3 py-1.5 border transition-colors ${filter === f.key ? "bg-navy text-white border-navy" : "border-silver/40 text-silver hover:text-charcoal"}`}>{f.label}</Link>
         ))}
       </div>
 
-      {error && (
-        <p className="text-sm text-red-600 mb-4">
-          건물 목록을 불러오지 못했습니다: {error.message}
-        </p>
-      )}
-
-      <div className="bg-white border border-silver/30 overflow-x-auto">
-        <table className="w-full text-sm min-w-[780px]">
-          <thead>
-            <tr className="text-left text-silver border-b border-silver/30">
-              <th className="px-4 py-3 font-normal">건물명</th>
-              <th className="px-4 py-3 font-normal">지역</th>
-              <th className="px-4 py-3 font-normal">준공연도</th>
-              <th className="px-4 py-3 font-normal">상태</th>
-              <th className="px-4 py-3 font-normal">공개여부</th>
-              <th className="px-4 py-3 font-normal">삭제여부</th>
-              <th className="px-4 py-3 font-normal text-right">관리</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(buildings ?? []).map((b) => (
-              <tr key={b.id} className="border-b border-silver/20 last:border-0">
-                <td className="px-4 py-3">
-                  <Link href={`/admin/buildings/${b.id}`} className="hover:underline">
-                    {b.name}
-                  </Link>
-                </td>
-                <td className="px-4 py-3 text-silver">
-                  {(b.districts as unknown as { name: string } | null)?.name ?? "-"}
-                </td>
-                <td className="px-4 py-3 text-silver">{b.completion_year ?? "-"}</td>
-                <td className="px-4 py-3 text-silver">{b.status}</td>
-                <td className="px-4 py-3">
-                  <span
-                    className={
-                      b.is_published
-                        ? "text-green-700 bg-green-50 px-2 py-0.5 text-xs border border-green-200"
-                        : "text-silver bg-fog px-2 py-0.5 text-xs border border-silver/30"
-                    }
-                  >
-                    {b.is_published ? "공개" : "비공개"}
-                  </span>
-                </td>
-                <td className="px-4 py-3">
-                  {b.deleted_at ? (
-                    <span className="text-red-700 bg-red-50 px-2 py-0.5 text-xs border border-red-200">
-                      삭제됨
-                    </span>
-                  ) : (
-                    <span className="text-silver text-xs">정상</span>
-                  )}
-                </td>
-                <td className="px-4 py-3 text-right space-x-3">
-                  <Link href={`/admin/buildings/${b.id}`} className="text-navy hover:underline">
-                    수정
-                  </Link>
-                  <DeleteBuildingButton id={b.id} name={b.name} deletedAt={b.deleted_at} />
-                </td>
-              </tr>
-            ))}
-            {(!buildings || buildings.length === 0) && (
-              <tr>
-                <td colSpan={7} className="px-4 py-10 text-center text-silver">
-                  {filter === "deleted"
-                    ? "삭제(보관)된 건물이 없습니다."
-                    : "아직 등록된 건물이 없습니다. 우측 상단의 '건물 등록' 버튼으로 첫 건물을 등록해 보세요."}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      {error && <p className="text-sm text-red-600 mb-4">건물 목록을 불러오지 못했습니다: {error.message}</p>}
+      <BuildingPublishManager buildings={rows} />
     </div>
   );
 }

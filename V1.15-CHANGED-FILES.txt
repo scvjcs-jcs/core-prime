@@ -1,0 +1,6 @@
+src/lib/buildingAutomation.ts
+src/app/admin/(protected)/buildings/actions.ts
+src/app/admin/(protected)/buildings/page.tsx
+src/components/admin/BuildingPublishManager.tsx
+V1.15-AUTOMATION-INTEGRATED.md
+V1.15-QA.md

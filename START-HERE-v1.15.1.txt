@@ -1,0 +1,12 @@
+CORE PRIME v1.15.1 오전 작업 통합본
+
+1) 이 폴더 내용을 기존 프로젝트에 덮어쓰기
+2) GitHub Desktop -> Commit -> Push origin
+3) Vercel Ready 확인
+4) Supabase SQL Editor에서 아래 파일 전체 실행
+   SUPABASE-APPLY-v1.12-to-v1.15-INTEGRATED.sql
+5) 관리자 페이지 Ctrl+F5
+6) CBRE 건물 기본정보 보강 실행
+7) 건물관리에서 공개 준비도 / Prime Score 추천 / 안전 공개 테스트
+
+주의: v1.11까지는 운영 DB에 적용되어 있다는 전제입니다.

@@ -84,6 +84,8 @@ export type BuildingParking = {
   mechanical_parking: boolean;
   ev_charging: boolean;
   operating_hours: string | null;
+  free_parking_text?: string | null;
+  paid_parking_text?: string | null;
   description: string | null;
 };
 
@@ -103,6 +105,24 @@ export type BuildingScores = {
   employee_access_score: number | null;
   total_score?: number | null;
   status: BuildingScoreStatus;
+};
+
+
+export type PrimeScoreRecommendationRecord = {
+  building_id?: string;
+  location_score: number;
+  transportation_score: number;
+  building_quality_score: number;
+  parking_score: number;
+  amenities_score: number;
+  corporate_image_score: number;
+  employee_access_score: number;
+  total_score: number;
+  confidence: number;
+  coverage: number;
+  algorithm_version: string;
+  reasons: Record<string, string[]>;
+  generated_at?: string | null;
 };
 
 export type BuildingImageType =

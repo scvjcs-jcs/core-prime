@@ -6,11 +6,12 @@ import {
   createBuilding,
   updateBuilding,
   markBuildingVerifiedNow,
+  generatePrimeScoreRecommendation,
   type BuildingFormPayload,
 } from "@/app/admin/(protected)/buildings/actions";
 import ImageUploader from "./ImageUploader";
 import AIContentPanel from "./AIContentPanel";
-import type { BuildingContent, BuildingImage, BuildingScoreStatus } from "@/lib/types";
+import type { BuildingContent, BuildingImage, BuildingScoreStatus, PrimeScoreRecommendationRecord } from "@/lib/types";
 
 const TABS = [
   "기본정보",
@@ -30,6 +31,7 @@ function emptyPayload(): BuildingFormPayload {
     basic: { name: "", name_en: "", alias: "", building_code: "", district_id: "", slug: "" },
     info: {
       completion_year: null,
+      completion_month: null,
       basement_floors: null,
       above_ground_floors: null,
       gross_floor_area: null,
@@ -37,7 +39,12 @@ function emptyPayload(): BuildingFormPayload {
       building_area: null,
       efficiency_ratio: null,
       elevator_count: null,
+      elevator_detail: "",
       freight_elevator_count: null,
+      typical_floor_leasable_area_sqm: null,
+      typical_floor_leasable_area_py: null,
+      typical_floor_exclusive_area_sqm: null,
+      typical_floor_exclusive_area_py: null,
       building_use: "",
       hvac_type: "",
       hvac_hours: "",
@@ -62,6 +69,8 @@ function emptyPayload(): BuildingFormPayload {
       mechanical_parking: false,
       ev_charging: false,
       operating_hours: "",
+      free_parking_text: "",
+      paid_parking_text: "",
       description: "",
     },
     scores: {
@@ -99,6 +108,7 @@ export default function BuildingForm({
   initialImages,
   initialContents,
   initialDataVerifiedAt,
+  initialScoreRecommendation,
 }: {
   mode: "create" | "edit";
   buildingId?: string;
@@ -107,6 +117,7 @@ export default function BuildingForm({
   initialImages?: BuildingImage[];
   initialContents?: BuildingContent[];
   initialDataVerifiedAt?: string | null;
+  initialScoreRecommendation?: PrimeScoreRecommendationRecord | null;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState(0);
@@ -115,6 +126,8 @@ export default function BuildingForm({
   const [error, setError] = useState<string | null>(null);
   const [verifiedAt, setVerifiedAt] = useState<string | null>(initialDataVerifiedAt ?? null);
   const [verifying, setVerifying] = useState(false);
+  const [scoreRecommendation, setScoreRecommendation] = useState<PrimeScoreRecommendationRecord | null>(initialScoreRecommendation ?? null);
+  const [scoreRecommending, setScoreRecommending] = useState(false);
 
   async function handleMarkVerified() {
     if (!buildingId) return;
@@ -126,6 +139,35 @@ export default function BuildingForm({
       return;
     }
     setVerifiedAt(result.verifiedAt ?? new Date().toISOString());
+  }
+
+
+
+  async function handleGenerateScoreRecommendation() {
+    if (!buildingId) return;
+    setScoreRecommending(true);
+    const result = await generatePrimeScoreRecommendation(buildingId);
+    setScoreRecommending(false);
+    if (result.error || !result.recommendation) {
+      window.alert(`추천점수 계산 실패: ${result.error ?? "알 수 없는 오류"}`);
+      return;
+    }
+    setScoreRecommendation(result.recommendation);
+  }
+
+  function applyScoreRecommendation() {
+    if (!scoreRecommendation) return;
+    update("scores", {
+      location_score: scoreRecommendation.location_score,
+      transportation_score: scoreRecommendation.transportation_score,
+      building_quality_score: scoreRecommendation.building_quality_score,
+      parking_score: scoreRecommendation.parking_score,
+      amenities_score: scoreRecommendation.amenities_score,
+      corporate_image_score: scoreRecommendation.corporate_image_score,
+      employee_access_score: scoreRecommendation.employee_access_score,
+      status: "DRAFT",
+    });
+    window.alert("추천점수를 초안으로 적용했습니다. 필요하면 항목별로 수정한 뒤 저장하고, 최종 확인 후 공개 상태를 '공개'로 변경하세요.");
   }
 
   function update<K extends keyof BuildingFormPayload>(
@@ -294,6 +336,10 @@ export default function BuildingForm({
               />
             </div>
             <div>
+              <label className={labelCls}>준공월</label>
+              <input type="number" min="1" max="12" className={inputCls} value={form.info.completion_month ?? ""} onChange={(e) => update("info", { completion_month: num(e.target.value) })} />
+            </div>
+            <div>
               <label className={labelCls}>지하 층수</label>
               <input
                 type="number"
@@ -357,6 +403,10 @@ export default function BuildingForm({
               />
             </div>
             <div>
+              <label className={labelCls}>엘리베이터 구성</label>
+              <input className={inputCls} value={form.info.elevator_detail} onChange={(e) => update("info", { elevator_detail: e.target.value })} placeholder="예: 총 10대 (승객용 5대, 셔틀용 3대, 비상용 2대)" />
+            </div>
+            <div>
               <label className={labelCls}>화물용 엘리베이터 수</label>
               <input
                 type="number"
@@ -364,6 +414,22 @@ export default function BuildingForm({
                 value={form.info.freight_elevator_count ?? ""}
                 onChange={(e) => update("info", { freight_elevator_count: num(e.target.value) })}
               />
+            </div>
+            <div>
+              <label className={labelCls}>기준층 임대면적 (㎡)</label>
+              <input type="number" step="0.01" className={inputCls} value={form.info.typical_floor_leasable_area_sqm ?? ""} onChange={(e) => update("info", { typical_floor_leasable_area_sqm: num(e.target.value) })} />
+            </div>
+            <div>
+              <label className={labelCls}>기준층 임대면적 (평)</label>
+              <input type="number" step="0.01" className={inputCls} value={form.info.typical_floor_leasable_area_py ?? ""} onChange={(e) => update("info", { typical_floor_leasable_area_py: num(e.target.value) })} />
+            </div>
+            <div>
+              <label className={labelCls}>기준층 전용면적 (㎡)</label>
+              <input type="number" step="0.01" className={inputCls} value={form.info.typical_floor_exclusive_area_sqm ?? ""} onChange={(e) => update("info", { typical_floor_exclusive_area_sqm: num(e.target.value) })} />
+            </div>
+            <div>
+              <label className={labelCls}>기준층 전용면적 (평)</label>
+              <input type="number" step="0.01" className={inputCls} value={form.info.typical_floor_exclusive_area_py ?? ""} onChange={(e) => update("info", { typical_floor_exclusive_area_py: num(e.target.value) })} />
             </div>
             <div>
               <label className={labelCls}>건물 용도</label>
@@ -578,6 +644,14 @@ export default function BuildingForm({
                 onChange={(e) => update("parking", { operating_hours: e.target.value })}
               />
             </div>
+            <div>
+              <label className={labelCls}>무료주차 조건</label>
+              <input className={inputCls} value={form.parking.free_parking_text ?? ""} onChange={(e) => update("parking", { free_parking_text: e.target.value })} placeholder="예: 임대면적 80평당 1대" />
+            </div>
+            <div>
+              <label className={labelCls}>유료주차 조건</label>
+              <input className={inputCls} value={form.parking.paid_parking_text ?? ""} onChange={(e) => update("parking", { paid_parking_text: e.target.value })} placeholder="예: 253,000원/대 (VAT 포함)" />
+            </div>
             <div className="md:col-span-3 flex flex-wrap gap-6 pt-2">
               <label className="flex items-center gap-2 text-sm">
                 <input
@@ -657,6 +731,64 @@ export default function BuildingForm({
               const allScored = SCORE_KEYS.every((k) => form.scores[k] !== null);
               return (
                 <>
+                  {mode === "edit" && buildingId && (
+                    <div className="mb-6 border border-silver/40 bg-slate-50 p-5">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                        <div>
+                          <p className="text-xs uppercase tracking-[0.18em] text-silver">Prime Score Assistant</p>
+                          <h3 className="mt-1 font-display text-lg text-navy">자동 추천점수 + 관리자 확정</h3>
+                          <p className="mt-2 max-w-3xl text-xs leading-5 text-silver">
+                            권역, 역 도보거리, 준공연도, 연면적, 전용률, 주차, 냉난방 등 현재 DB 값을 기준으로 추천합니다.
+                            누락된 데이터는 0점 처리하지 않고 중립값으로 계산하며, 추천점수는 자동 공개되지 않습니다.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleGenerateScoreRecommendation}
+                          disabled={scoreRecommending}
+                          className="shrink-0 bg-navy px-4 py-2.5 text-sm text-white disabled:opacity-50"
+                        >
+                          {scoreRecommending ? "추천점수 계산 중..." : scoreRecommendation ? "추천점수 다시 계산" : "자동 추천점수 계산"}
+                        </button>
+                      </div>
+
+                      {scoreRecommendation && (
+                        <div className="mt-5">
+                          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                            <div className="border border-silver/30 bg-white p-3"><p className="text-[11px] text-silver">추천 총점</p><p className="mt-1 font-display text-2xl">{Number(scoreRecommendation.total_score).toFixed(1)}</p></div>
+                            <div className="border border-silver/30 bg-white p-3"><p className="text-[11px] text-silver">추천 신뢰도</p><p className="mt-1 font-display text-2xl">{scoreRecommendation.confidence}%</p></div>
+                            <div className="border border-silver/30 bg-white p-3"><p className="text-[11px] text-silver">데이터 충족도</p><p className="mt-1 font-display text-2xl">{scoreRecommendation.coverage}%</p></div>
+                            <div className="border border-silver/30 bg-white p-3"><p className="text-[11px] text-silver">알고리즘</p><p className="mt-2 text-xs">{scoreRecommendation.algorithm_version}</p></div>
+                          </div>
+
+                          <div className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2">
+                            {([
+                              ["입지", "location_score", "location"],
+                              ["교통", "transportation_score", "transportation"],
+                              ["건물 품질", "building_quality_score", "building_quality"],
+                              ["주차", "parking_score", "parking"],
+                              ["편의시설", "amenities_score", "amenities"],
+                              ["기업 이미지", "corporate_image_score", "corporate_image"],
+                              ["직원 접근성", "employee_access_score", "employee_access"],
+                            ] as const).map(([label, scoreKey, reasonKey]) => (
+                              <div key={scoreKey} className="border border-silver/30 bg-white p-3">
+                                <div className="flex items-center justify-between"><span className="text-sm">{label}</span><strong className="font-display">{scoreRecommendation[scoreKey]}점</strong></div>
+                                <p className="mt-1 text-[11px] leading-4 text-silver">{(scoreRecommendation.reasons?.[reasonKey] ?? []).join(" · ") || "세부 근거 없음"}</p>
+                              </div>
+                            ))}
+                          </div>
+
+                          <div className="mt-4 flex flex-wrap items-center gap-3">
+                            <button type="button" onClick={applyScoreRecommendation} className="border border-navy bg-white px-4 py-2 text-sm text-navy">
+                              추천점수 초안에 적용
+                            </button>
+                            <span className="text-xs text-silver">적용 후에도 자동 공개되지 않습니다. 관리자가 수정·저장 후 공개를 확정합니다.</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <div className="mb-6">
                     <label className={labelCls}>공개 상태</label>
                     <select

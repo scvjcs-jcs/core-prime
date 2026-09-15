@@ -1,6 +1,6 @@
 import type { ExtractedField, ParsedBuilding, ParsedListing, ParserPage, ParserResult } from "../types";
 
-export const CBRE_PARSER_VERSION = "CBRE-v1.8.1";
+export const CBRE_PARSER_VERSION = "CBRE-v1.14.0";
 
 const f = <T>(value: T | null, raw: string | null, page: number, confidence: number): ExtractedField<T> => ({
   value,
@@ -287,22 +287,82 @@ function oneJoined(text: string, re: RegExp): string | null {
   return linesOf(text).join(" ").match(re)?.[1]?.trim() ?? null;
 }
 
+function sliceLabelValue(joined: string, label: string, stopLabels: string[]): string | null {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const stops = stopLabels.map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const re = new RegExp(`${escaped}\\s+(.+?)(?=\\s+(?:${stops})|$)`, "i");
+  return joined.match(re)?.[1]?.trim() ?? null;
+}
+
 function parseBuildingFacts(text: string, page: number) {
-  const joined = linesOf(text).join(" ");
+  const joined = linesOf(text).join(" ").replace(/\s{2,}/g, " ");
   const address = joined.match(/주소\s+(.+?)(?=\s+지하철역|\s+연면적|\s+준공년도|\s+규모)/i)?.[1]?.trim() ?? null;
+  const subway = joined.match(/지하철역\s+(.+?)(?=\s+연면적|\s+준공년도|\s+규모|\s+전용률|\s+주차대수)/i)?.[1]?.trim() ?? null;
   const gfa = joined.match(/연면적\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\)/i);
   const completion = joined.match(/준공년도\s+(\d{4})(?:년(?:\s*(\d{1,2})월)?)?/i);
-  const exclusiveRatio = joined.match(/전용률\s+([^\s]+(?:\s*[:：]\s*[^\s]+)?)/i)?.[1]?.trim() ?? null;
+  const scale = joined.match(/규모\s+(?:지하\s*)?B?(\d+)\s*\/\s*(?:지상\s*)?(\d+)F/i)
+    ?? joined.match(/규모\s+B(\d+)\s*\/\s*(\d+)F/i);
+  const exclusiveRatio = joined.match(/전용률\s+([\d.]+)\s*%/i);
   const parking = joined.match(/주차대수\s+(?:총\s*)?([\d,]+)대/i)?.[1] ?? null;
+
+  const elevatorWindow = joined.match(/엘리베이터(?:\s*대수)?\s+(.{0,220}?)(?=\s+주차대수|\s+무료주차|\s+유료주차|\s+기준층|\s+전용률|\s+Availabilities|$)/i)?.[1]?.trim() ?? null;
+  const elevatorTotal = (elevatorWindow ?? joined).match(/(?:총\s*)?([\d,]+)대/i)?.[1] ?? null;
+  const passengerElevators = (elevatorWindow ?? joined).match(/승객용\s*([\d,]+)대/i)?.[1] ?? null;
+  const shuttleElevators = (elevatorWindow ?? joined).match(/셔틀(?:용)?\s*([\d,]+)대/i)?.[1] ?? null;
+  const emergencyElevators = (elevatorWindow ?? joined).match(/비상용\s*([\d,]+)대/i)?.[1] ?? null;
+  const elevatorParts = [
+    passengerElevators ? `승객용 ${passengerElevators}대` : null,
+    shuttleElevators ? `셔틀용 ${shuttleElevators}대` : null,
+    emergencyElevators ? `비상용 ${emergencyElevators}대` : null,
+  ].filter(Boolean);
+  const elevatorDetail = elevatorTotal ? `총 ${elevatorTotal}대${elevatorParts.length ? ` (${elevatorParts.join(", ")})` : ""}` : null;
+
+  const cleanParkingText = (value: string | null, kind: "FREE" | "PAID") => {
+    if (!value) return null;
+    const v = value.replace(/\s+(?:임대면적|전용면적)\s*$/i, "").trim();
+    if (/추후\s*확정/i.test(v)) return "추후 확정";
+    if (kind === "FREE") {
+      const m = v.match(/(?:임대면적\s*)?[\d,.]+\s*평당\s*[\d,.]+대/i);
+      if (m) return m[0].trim();
+    } else {
+      const m = v.match(/[\d,]+원\s*\/\s*대(?:\s*\([^)]*VAT[^)]*\))?/i);
+      if (m) return m[0].trim();
+    }
+    return v.length <= 80 ? v : v.slice(0, 80).trim();
+  };
+  const freeParking = cleanParkingText(sliceLabelValue(joined, "무료주차", ["유료주차", "Availabilities", "Floorplan", "CBRE Contacts", "기준층", "입주가능시기"]), "FREE");
+  const paidParking = cleanParkingText(sliceLabelValue(joined, "유료주차", ["Availabilities", "Floorplan", "CBRE Contacts", "기준층", "입주가능시기"]), "PAID");
+
+  // CBRE 일반정보 표는 PDF 읽기 순서에 따라 `기준층 -> 면적 -> 무료주차 -> 임대면적`처럼
+  // 열 라벨이 면적값 뒤에 배치되기도 합니다. 일반형과 interleaved형을 둘 다 지원합니다.
+  const typicalLeaseNormal = joined.match(/기준층\s*임대면적\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\)/i);
+  const typicalExclusiveNormal = joined.match(/기준층\s*전용면적\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\)/i);
+  const interleaved = joined.match(/기준층\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\).*?임대면적\s+기준층\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\).*?전용면적/i);
+  const typicalLeaseSqm = typicalLeaseNormal?.[1] ?? interleaved?.[1] ?? null;
+  const typicalLeasePy = typicalLeaseNormal?.[2] ?? interleaved?.[2] ?? null;
+  const typicalExclusiveSqm = typicalExclusiveNormal?.[1] ?? interleaved?.[3] ?? null;
+  const typicalExclusivePy = typicalExclusiveNormal?.[2] ?? interleaved?.[4] ?? null;
 
   return {
     road_address: f(address, address, page, address ? 0.92 : 0),
+    subway_access_text: f(subway, subway, page, subway ? 0.82 : 0),
     gross_floor_area_sqm: f(n(gfa?.[1]), gfa?.[1] ?? null, page, gfa?.[1] ? 0.96 : 0),
     gross_floor_area_py: f(n(gfa?.[2]), gfa?.[2] ?? null, page, gfa?.[2] ? 0.96 : 0),
     completion_year: f(n(completion?.[1]), completion?.[0] ?? null, page, completion?.[1] ? 0.95 : 0),
     completion_month: f(n(completion?.[2]), completion?.[0] ?? null, page, completion?.[2] ? 0.9 : 0),
-    exclusive_ratio_text: f(exclusiveRatio, exclusiveRatio, page, exclusiveRatio ? 0.75 : 0),
+    basement_floors: f(n(scale?.[1]), scale?.[0] ?? null, page, scale?.[1] ? 0.94 : 0),
+    above_ground_floors: f(n(scale?.[2]), scale?.[0] ?? null, page, scale?.[2] ? 0.94 : 0),
+    efficiency_ratio: f(n(exclusiveRatio?.[1]), exclusiveRatio?.[0] ?? null, page, exclusiveRatio?.[1] ? 0.94 : 0),
+    exclusive_ratio_text: f(exclusiveRatio?.[0] ?? null, exclusiveRatio?.[0] ?? null, page, exclusiveRatio?.[1] ? 0.9 : 0),
+    elevator_count: f(n(elevatorTotal), elevatorWindow, page, elevatorTotal ? 0.88 : 0),
+    elevator_detail: f(elevatorDetail, elevatorWindow, page, elevatorDetail ? 0.9 : 0),
     parking_total: f(n(parking), parking, page, parking ? 0.9 : 0),
+    free_parking_text: f(freeParking, freeParking, page, freeParking ? 0.82 : 0),
+    paid_parking_text: f(paidParking, paidParking, page, paidParking ? 0.82 : 0),
+    typical_floor_leasable_sqm: f(n(typicalLeaseSqm), typicalLeaseSqm, page, typicalLeaseSqm ? 0.9 : 0),
+    typical_floor_leasable_py: f(n(typicalLeasePy), typicalLeasePy, page, typicalLeasePy ? 0.9 : 0),
+    typical_floor_exclusive_sqm: f(n(typicalExclusiveSqm), typicalExclusiveSqm, page, typicalExclusiveSqm ? 0.9 : 0),
+    typical_floor_exclusive_py: f(n(typicalExclusivePy), typicalExclusivePy, page, typicalExclusivePy ? 0.9 : 0),
   };
 }
 

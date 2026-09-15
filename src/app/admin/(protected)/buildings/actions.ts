@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import type { BuildingParking, BuildingScores, BuildingTransportation } from "@/lib/types";
 import { normalizeBuildingName } from "@/lib/normalizeBuildingName";
+import { calculatePrimeScoreRecommendation } from "@/lib/primeScoreRecommendation";
 
 export type BuildingFormPayload = {
   basic: {
@@ -16,6 +17,7 @@ export type BuildingFormPayload = {
   };
   info: {
     completion_year: number | null;
+    completion_month: number | null;
     basement_floors: number | null;
     above_ground_floors: number | null;
     gross_floor_area: number | null;
@@ -23,7 +25,12 @@ export type BuildingFormPayload = {
     building_area: number | null;
     efficiency_ratio: number | null;
     elevator_count: number | null;
+    elevator_detail: string;
     freight_elevator_count: number | null;
+    typical_floor_leasable_area_sqm: number | null;
+    typical_floor_leasable_area_py: number | null;
+    typical_floor_exclusive_area_sqm: number | null;
+    typical_floor_exclusive_area_py: number | null;
     building_use: string;
     hvac_type: string;
     hvac_hours: string;
@@ -117,6 +124,7 @@ export async function createBuilding(
       // 건물명 기반 정규화 이름 — 나중에 PDF Import가 같은 건물인지 매칭할 때 사용합니다.
       normalized_name: normalizeBuildingName(payload.basic.name),
       completion_year: payload.info.completion_year,
+      completion_month: payload.info.completion_month,
       basement_floors: payload.info.basement_floors,
       above_ground_floors: payload.info.above_ground_floors,
       gross_floor_area: payload.info.gross_floor_area,
@@ -124,7 +132,12 @@ export async function createBuilding(
       building_area: payload.info.building_area,
       efficiency_ratio: payload.info.efficiency_ratio,
       elevator_count: payload.info.elevator_count,
+      elevator_detail: payload.info.elevator_detail || null,
       freight_elevator_count: payload.info.freight_elevator_count,
+      typical_floor_leasable_area_sqm: payload.info.typical_floor_leasable_area_sqm,
+      typical_floor_leasable_area_py: payload.info.typical_floor_leasable_area_py,
+      typical_floor_exclusive_area_sqm: payload.info.typical_floor_exclusive_area_sqm,
+      typical_floor_exclusive_area_py: payload.info.typical_floor_exclusive_area_py,
       building_use: payload.info.building_use || null,
       hvac_type: payload.info.hvac_type || null,
       hvac_hours: payload.info.hvac_hours || null,
@@ -178,6 +191,7 @@ export async function updateBuilding(
       slug: sanitizeManualSlug(payload.basic.slug ?? "") || undefined,
       normalized_name: normalizeBuildingName(payload.basic.name),
       completion_year: payload.info.completion_year,
+      completion_month: payload.info.completion_month,
       basement_floors: payload.info.basement_floors,
       above_ground_floors: payload.info.above_ground_floors,
       gross_floor_area: payload.info.gross_floor_area,
@@ -185,7 +199,12 @@ export async function updateBuilding(
       building_area: payload.info.building_area,
       efficiency_ratio: payload.info.efficiency_ratio,
       elevator_count: payload.info.elevator_count,
+      elevator_detail: payload.info.elevator_detail || null,
       freight_elevator_count: payload.info.freight_elevator_count,
+      typical_floor_leasable_area_sqm: payload.info.typical_floor_leasable_area_sqm,
+      typical_floor_leasable_area_py: payload.info.typical_floor_leasable_area_py,
+      typical_floor_exclusive_area_sqm: payload.info.typical_floor_exclusive_area_sqm,
+      typical_floor_exclusive_area_py: payload.info.typical_floor_exclusive_area_py,
       building_use: payload.info.building_use || null,
       hvac_type: payload.info.hvac_type || null,
       hvac_hours: payload.info.hvac_hours || null,
@@ -233,6 +252,8 @@ async function saveRelatedTables(payload: BuildingFormPayload, buildingId: strin
       mechanical_parking: payload.parking.mechanical_parking,
       ev_charging: payload.parking.ev_charging,
       operating_hours: payload.parking.operating_hours || null,
+      free_parking_text: payload.parking.free_parking_text || null,
+      paid_parking_text: payload.parking.paid_parking_text || null,
       description: payload.parking.description || null,
     },
     { onConflict: "building_id" }
@@ -318,4 +339,235 @@ export async function markBuildingVerifiedNow(id: string): Promise<{ error?: str
   }
   revalidatePath(`/admin/buildings/${id}`);
   return { verifiedAt: now };
+}
+
+
+export async function generatePrimeScoreRecommendation(buildingId: string): Promise<{
+  error?: string;
+  recommendation?: ReturnType<typeof calculatePrimeScoreRecommendation>;
+}> {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return { error: "로그인이 필요합니다." };
+
+  const { data: admin } = await supabase
+    .from("admins")
+    .select("id,is_active")
+    .eq("id", user.id)
+    .maybeSingle();
+  if (!admin?.is_active) return { error: "관리자 권한이 필요합니다." };
+
+  const [buildingRes, transportRes, parkingRes, imagesRes] = await Promise.all([
+    supabase
+      .from("buildings")
+      .select("id,name,district_id,completion_year,gross_floor_area,above_ground_floors,elevator_count,efficiency_ratio,building_grade,hvac_type,building_use,districts(name)")
+      .eq("id", buildingId)
+      .maybeSingle(),
+    supabase
+      .from("building_transportation")
+      .select("station_name,line_name,walk_minutes")
+      .eq("building_id", buildingId),
+    supabase
+      .from("building_parking")
+      .select("total_spaces,self_parking,mechanical_parking,ev_charging")
+      .eq("building_id", buildingId)
+      .maybeSingle(),
+    supabase
+      .from("building_images")
+      .select("type")
+      .eq("building_id", buildingId),
+  ]);
+
+  if (buildingRes.error) return { error: buildingRes.error.message };
+  if (!buildingRes.data) return { error: "건물을 찾을 수 없습니다." };
+  if (transportRes.error) return { error: transportRes.error.message };
+  if (parkingRes.error) return { error: parkingRes.error.message };
+  if (imagesRes.error) return { error: imagesRes.error.message };
+
+  const districtRel = buildingRes.data.districts as unknown as { name?: string | null } | { name?: string | null }[] | null;
+  const districtName = Array.isArray(districtRel) ? districtRel[0]?.name ?? null : districtRel?.name ?? null;
+
+  const input = {
+    districtName,
+    completionYear: buildingRes.data.completion_year,
+    grossFloorAreaSqm: buildingRes.data.gross_floor_area == null ? null : Number(buildingRes.data.gross_floor_area),
+    aboveGroundFloors: buildingRes.data.above_ground_floors,
+    elevatorCount: buildingRes.data.elevator_count,
+    efficiencyRatio: buildingRes.data.efficiency_ratio == null ? null : Number(buildingRes.data.efficiency_ratio),
+    buildingGrade: buildingRes.data.building_grade,
+    hvacType: buildingRes.data.hvac_type,
+    buildingUse: buildingRes.data.building_use,
+    transportation: transportRes.data ?? [],
+    parking: parkingRes.data ?? null,
+    imageTypes: (imagesRes.data ?? []).map((x: { type: string | null }) => x.type).filter((v: string | null): v is string => Boolean(v)),
+  };
+
+  const recommendation = calculatePrimeScoreRecommendation(input);
+  const { error: saveError } = await supabase
+    .from("prime_score_recommendations")
+    .upsert({
+      building_id: buildingId,
+      location_score: recommendation.location_score,
+      transportation_score: recommendation.transportation_score,
+      building_quality_score: recommendation.building_quality_score,
+      parking_score: recommendation.parking_score,
+      amenities_score: recommendation.amenities_score,
+      corporate_image_score: recommendation.corporate_image_score,
+      employee_access_score: recommendation.employee_access_score,
+      total_score: recommendation.total_score,
+      confidence: recommendation.confidence,
+      coverage: recommendation.coverage,
+      algorithm_version: recommendation.algorithm_version,
+      reasons: recommendation.reasons,
+      inputs_snapshot: input,
+      generated_by: user.id,
+      generated_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "building_id" });
+
+  if (saveError) return { error: saveError.message };
+  revalidatePath(`/admin/buildings/${buildingId}`);
+  return { recommendation };
+}
+
+// v1.13 — 건물 공개/비공개 일괄 변경
+// 관리자 건물 목록에서 검수가 끝난 건물을 선택하여 한 번에 고객 사이트에 공개하거나
+// 다시 비공개로 전환할 때 사용합니다. Soft-deleted 건물은 항상 제외합니다.
+export async function bulkSetBuildingPublished(
+  buildingIds: string[],
+  isPublished: boolean
+): Promise<{ error?: string; updated?: number }> {
+  const ids = Array.from(new Set((buildingIds ?? []).filter(Boolean)));
+  if (ids.length === 0) return { error: "선택된 건물이 없습니다." };
+  if (ids.length > 500) return { error: "한 번에 최대 500개 건물까지 변경할 수 있습니다." };
+
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return { error: "로그인이 필요합니다." };
+
+  const { data: admin } = await supabase
+    .from("admins")
+    .select("id,is_active")
+    .eq("id", user.id)
+    .maybeSingle();
+  if (!admin?.is_active) return { error: "관리자 권한이 필요합니다." };
+
+  // 대상이 실제 존재하고 삭제 상태가 아닌지 먼저 확인합니다.
+  const { data: eligible, error: eligibleError } = await supabase
+    .from("buildings")
+    .select("id")
+    .in("id", ids)
+    .is("deleted_at", null);
+
+  if (eligibleError) return { error: eligibleError.message };
+  const eligibleIds = (eligible ?? []).map((row) => row.id);
+  if (eligibleIds.length === 0) {
+    return { error: "변경 가능한 정상 건물이 없습니다. 삭제된 건물은 공개할 수 없습니다." };
+  }
+
+  const { data: updatedRows, error } = await supabase
+    .from("buildings")
+    .update({ is_published: isPublished })
+    .in("id", eligibleIds)
+    .is("deleted_at", null)
+    .select("id");
+
+  if (error) return { error: error.message };
+
+  // 가능하면 공개/비공개 변경 이력을 남깁니다. audit_logs 스키마 차이로 실패해도 본 변경은 유지합니다.
+  try {
+    await supabase.from("audit_logs").insert({
+      action: isPublished ? "BULK_PUBLISH_BUILDINGS" : "BULK_UNPUBLISH_BUILDINGS",
+      entity_type: "buildings",
+      entity_id: null,
+      metadata: {
+        building_ids: eligibleIds,
+        requested_count: ids.length,
+        updated_count: updatedRows?.length ?? eligibleIds.length,
+      },
+      actor_id: user.id,
+    });
+  } catch {
+    // audit_logs 컬럼 구성이 다른 운영 DB에서도 공개상태 변경 자체는 실패시키지 않습니다.
+  }
+
+  revalidatePath("/admin/buildings");
+  revalidatePath("/buildings");
+  revalidatePath("/");
+  revalidatePath("/admin");
+
+  return { updated: updatedRows?.length ?? eligibleIds.length };
+}
+
+
+// v1.15 — 선택 건물 Prime Score 추천 일괄 생성
+// 공식 점수(building_scores)는 변경하지 않고 recommendation만 생성합니다.
+export async function bulkGeneratePrimeScoreRecommendations(
+  buildingIds: string[]
+): Promise<{ error?: string; generated?: number; failed?: number; messages?: string[] }> {
+  const ids = Array.from(new Set((buildingIds ?? []).filter(Boolean))).slice(0, 50);
+  if (ids.length === 0) return { error: "추천점수를 생성할 건물을 선택해 주세요." };
+
+  let generated = 0;
+  let failed = 0;
+  const messages: string[] = [];
+  for (const id of ids) {
+    const result = await generatePrimeScoreRecommendation(id);
+    if (result.error) {
+      failed += 1;
+      if (messages.length < 5) messages.push(result.error);
+    } else generated += 1;
+  }
+  revalidatePath("/admin/buildings");
+  revalidatePath("/admin");
+  return { generated, failed, messages };
+}
+
+// v1.15 — 공개 준비 완료 건물만 서버에서 다시 검증한 뒤 공개합니다.
+// 최소 기준: 주소, 준공연도, 연면적, 지상층수, 주차대수, 현재 공실 1건 이상.
+export async function bulkPublishReadyBuildings(
+  buildingIds: string[]
+): Promise<{ error?: string; published?: number; blocked?: number; blockedNames?: string[] }> {
+  const ids = Array.from(new Set((buildingIds ?? []).filter(Boolean))).slice(0, 500);
+  if (ids.length === 0) return { error: "건물을 선택해 주세요." };
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return { error: "로그인이 필요합니다." };
+  const { data: admin } = await supabase.from("admins").select("id,is_active").eq("id", user.id).maybeSingle();
+  if (!admin?.is_active) return { error: "관리자 권한이 필요합니다." };
+
+  const [{ data: rows, error: buildingError }, { data: parkingRows }, { data: listingRows }] = await Promise.all([
+    supabase.from("buildings").select("id,name,road_address,address,completion_year,gross_floor_area,above_ground_floors,deleted_at").in("id", ids),
+    supabase.from("building_parking").select("building_id,total_spaces").in("building_id", ids),
+    supabase.from("listings").select("building_id").in("building_id", ids).in("status", ["available", "negotiating"]),
+  ]);
+  if (buildingError) return { error: buildingError.message };
+
+  const parking = new Map<string, number | null>((parkingRows ?? []).map((x: { building_id: string; total_spaces: number | null }) => [x.building_id, x.total_spaces]));
+  const listingCounts = new Map<string, number>();
+  for (const x of listingRows ?? []) listingCounts.set(x.building_id, (listingCounts.get(x.building_id) ?? 0) + 1);
+
+  const readyIds: string[] = [];
+  const blockedNames: string[] = [];
+  for (const b of rows ?? []) {
+    const ok = !b.deleted_at
+      && Boolean((b.road_address ?? b.address ?? "").trim())
+      && b.completion_year != null
+      && b.gross_floor_area != null && Number(b.gross_floor_area) > 0
+      && b.above_ground_floors != null && b.above_ground_floors > 0
+      && (parking.get(b.id) ?? 0) > 0
+      && (listingCounts.get(b.id) ?? 0) > 0;
+    if (ok) readyIds.push(b.id); else if (blockedNames.length < 20) blockedNames.push(b.name ?? b.id);
+  }
+
+  if (readyIds.length > 0) {
+    const { error } = await supabase.from("buildings").update({ is_published: true }).in("id", readyIds).is("deleted_at", null);
+    if (error) return { error: error.message };
+  }
+
+  revalidatePath("/admin/buildings");
+  revalidatePath("/buildings");
+  revalidatePath("/");
+  revalidatePath("/admin");
+  return { published: readyIds.length, blocked: ids.length - readyIds.length, blockedNames };
 }

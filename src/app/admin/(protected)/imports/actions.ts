@@ -850,3 +850,180 @@ export async function verifyListingWarningNoChange(
     status: typeof result.status === "string" ? result.status : undefined,
   };
 }
+
+function extractedFieldValue<T = unknown>(data: Record<string, unknown>, key: string): T | null {
+  const field = data[key];
+  if (!field || typeof field !== "object") return null;
+  const value = (field as Record<string, unknown>).value;
+  return (value === undefined || value === null || value === "") ? null : value as T;
+}
+
+function normalizeTitleForJoin(value: string | null | undefined): string {
+  return (value ?? "").toLowerCase().replace(/[\s·._\-()[\]{}]/g, "");
+}
+
+function parseFirstStation(accessText: string | null): { line_name: string | null; station_name: string | null; description: string | null } | null {
+  if (!accessText?.trim()) return null;
+  const line = accessText.match(/((?:\d+(?:,\d+)*|[가-힣A-Za-z]+)호선)/)?.[1] ?? null;
+  const station = accessText.match(/([가-힣A-Za-z0-9·]+역)/)?.[1] ?? null;
+  return { line_name: line, station_name: station, description: accessText.trim() };
+}
+
+/**
+ * CBRE 원문에서 건물 일반정보(연면적/규모/전용률/엘리베이터/주차/기준층 등)를 다시 읽어
+ * 이미 매칭/등록된 canonical building에 "비어 있는 값만" 보강합니다.
+ * 기존에 관리자가 입력한 값은 절대 덮어쓰지 않습니다.
+ */
+export async function enrichCbreBuildingFacts(sourceDocumentId: string): Promise<{
+  error?: string;
+  parsedBuildings?: number;
+  matchedBuildings?: number;
+  updatedBuildings?: number;
+  parkingUpdated?: number;
+  transportAdded?: number;
+  skipped?: number;
+}> {
+  const { supabase, admin, error: authError } = await requireAdmin();
+  if (!admin) return { error: authError ?? "관리자 권한이 없는 계정입니다." };
+
+  const { data: doc, error: docError } = await supabase
+    .from("source_documents")
+    .select("id,parser_type,report_date")
+    .eq("id", sourceDocumentId)
+    .maybeSingle();
+  if (docError || !doc) return { error: docError?.message ?? "자료를 찾을 수 없습니다." };
+  if (doc.parser_type !== "CBRE") return { error: "CBRE 자료에서만 건물 기본정보 보강을 실행할 수 있습니다." };
+
+  const { data: run } = await supabase
+    .from("parsing_runs")
+    .select("id,status")
+    .eq("source_document_id", sourceDocumentId)
+    .eq("parser_version", "TEXT-EXTRACT-v1.0.0")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!run || run.status !== "COMPLETED") return { error: "완료된 PDF 원문 추출 결과가 필요합니다." };
+
+  const { data: pages, error: pageError } = await supabase
+    .from("source_document_pages")
+    .select("page_number,extracted_text")
+    .eq("parsing_run_id", run.id)
+    .order("page_number", { ascending: true });
+  if (pageError) return { error: pageError.message };
+
+  const parsed = parseCBREPages((pages ?? []).map((p: { page_number: number; extracted_text: string | null }) => ({ page_number: p.page_number, extracted_text: p.extracted_text })));
+  if (parsed.buildings.length < 100) return { error: `CBRE 건물 정보 재추출 품질검사 실패: 건물 ${parsed.buildings.length}개 감지. 기존 데이터는 변경하지 않았습니다.` };
+
+  const { data: stagingRows, error: stagingError } = await supabase
+    .from("staging_buildings")
+    .select("id,raw_building_name,normalized_building_name,primary_source_page,matched_building_id,extracted_data")
+    .eq("source_document_id", sourceDocumentId)
+    .eq("parsing_run_id", run.id);
+  if (stagingError) return { error: stagingError.message };
+
+  const byPage = new Map<number, any[]>();
+  for (const s of stagingRows ?? []) {
+    const arr = byPage.get(s.primary_source_page) ?? [];
+    arr.push(s);
+    byPage.set(s.primary_source_page, arr);
+  }
+
+  let matchedBuildings = 0;
+  let updatedBuildings = 0;
+  let parkingUpdated = 0;
+  let transportAdded = 0;
+  let skipped = 0;
+
+  for (const pb of parsed.buildings) {
+    const pageCandidates = byPage.get(pb.primary_source_page) ?? [];
+    let s = pageCandidates.find((x) => normalizeTitleForJoin(x.raw_building_name) === normalizeTitleForJoin(pb.raw_building_name));
+    if (!s && pageCandidates.length === 1) s = pageCandidates[0];
+    if (!s?.matched_building_id) { skipped += 1; continue; }
+    matchedBuildings += 1;
+
+    const richer = pb.extracted_data as Record<string, unknown>;
+    const mergedStaging = { ...((s.extracted_data ?? {}) as Record<string, unknown>), ...richer, _building_facts_version: "CBRE-BUILDING-FACTS-v1.14.0" };
+    await supabase.from("staging_buildings").update({ extracted_data: mergedStaging }).eq("id", s.id);
+
+    const { data: current, error: currentError } = await supabase
+      .from("buildings")
+      .select("id,road_address,completion_year,completion_month,basement_floors,above_ground_floors,gross_floor_area,efficiency_ratio,elevator_count,elevator_detail,typical_floor_leasable_area_sqm,typical_floor_leasable_area_py,typical_floor_exclusive_area_sqm,typical_floor_exclusive_area_py")
+      .eq("id", s.matched_building_id)
+      .maybeSingle();
+    if (currentError || !current) { skipped += 1; continue; }
+
+    const patch: Record<string, unknown> = {};
+    const fill = (column: string, currentValue: unknown, key: string) => {
+      const next = extractedFieldValue(richer, key);
+      if ((currentValue === null || currentValue === undefined || currentValue === "") && next !== null) patch[column] = next;
+    };
+    fill("completion_year", current.completion_year, "completion_year");
+    fill("completion_month", current.completion_month, "completion_month");
+    fill("basement_floors", current.basement_floors, "basement_floors");
+    fill("above_ground_floors", current.above_ground_floors, "above_ground_floors");
+    fill("gross_floor_area", current.gross_floor_area, "gross_floor_area_sqm");
+    fill("efficiency_ratio", current.efficiency_ratio, "efficiency_ratio");
+    fill("elevator_count", current.elevator_count, "elevator_count");
+    fill("elevator_detail", current.elevator_detail, "elevator_detail");
+    fill("typical_floor_leasable_area_sqm", current.typical_floor_leasable_area_sqm, "typical_floor_leasable_sqm");
+    fill("typical_floor_leasable_area_py", current.typical_floor_leasable_area_py, "typical_floor_leasable_py");
+    fill("typical_floor_exclusive_area_sqm", current.typical_floor_exclusive_area_sqm, "typical_floor_exclusive_sqm");
+    fill("typical_floor_exclusive_area_py", current.typical_floor_exclusive_area_py, "typical_floor_exclusive_py");
+    if (Object.keys(patch).length > 0) {
+      patch.data_last_verified_at = doc.report_date || new Date().toISOString().slice(0, 10);
+      const { error } = await supabase.from("buildings").update(patch).eq("id", current.id);
+      if (error) return { error: `건물 기본정보 저장 실패: ${error.message}` };
+      updatedBuildings += 1;
+    }
+
+    const { data: parking } = await supabase
+      .from("building_parking")
+      .select("id,total_spaces,free_parking_text,paid_parking_text")
+      .eq("building_id", current.id)
+      .maybeSingle();
+    const totalSpaces = extractedFieldValue<number>(richer, "parking_total");
+    const freeParkingText = extractedFieldValue<string>(richer, "free_parking_text");
+    const paidParkingText = extractedFieldValue<string>(richer, "paid_parking_text");
+    if (parking) {
+      const pp: Record<string, unknown> = {};
+      if (parking.total_spaces == null && totalSpaces != null) pp.total_spaces = totalSpaces;
+      if (!parking.free_parking_text && freeParkingText) pp.free_parking_text = freeParkingText;
+      if (!parking.paid_parking_text && paidParkingText) pp.paid_parking_text = paidParkingText;
+      if (Object.keys(pp).length > 0) {
+        const { error } = await supabase.from("building_parking").update(pp).eq("id", parking.id);
+        if (error) return { error: `주차정보 저장 실패: ${error.message}` };
+        parkingUpdated += 1;
+      }
+    } else if (totalSpaces != null || freeParkingText || paidParkingText) {
+      const { error } = await supabase.from("building_parking").insert({ building_id: current.id, total_spaces: totalSpaces, free_parking_text: freeParkingText, paid_parking_text: paidParkingText });
+      if (error) return { error: `주차정보 생성 실패: ${error.message}` };
+      parkingUpdated += 1;
+    }
+
+    const subwayText = extractedFieldValue<string>(richer, "subway_access_text");
+    if (subwayText && /역/.test(subwayText)) {
+      const { count } = await supabase.from("building_transportation").select("id", { count: "exact", head: true }).eq("building_id", current.id);
+      if ((count ?? 0) === 0) {
+        const t = parseFirstStation(subwayText);
+        if (t) {
+          const { error } = await supabase.from("building_transportation").insert({ building_id: current.id, transport_type: "지하철", ...t });
+          if (!error) transportAdded += 1;
+        }
+      }
+    }
+  }
+
+  await supabase.from("audit_logs").insert({
+    actor_type: "ADMIN",
+    actor_id: admin.id,
+    action: "ENRICH_CBRE_BUILDING_FACTS",
+    entity_type: "source_document",
+    entity_id: sourceDocumentId,
+    after_data: { parser_version: CBRE_PARSER_VERSION, parsed_buildings: parsed.buildings.length, matched_buildings: matchedBuildings, updated_buildings: updatedBuildings, parking_updated: parkingUpdated, transport_added: transportAdded, skipped },
+  });
+
+  revalidatePath(`/admin/imports/${sourceDocumentId}`);
+  revalidatePath("/admin/buildings");
+  revalidatePath("/buildings");
+  return { parsedBuildings: parsed.buildings.length, matchedBuildings, updatedBuildings, parkingUpdated, transportAdded, skipped };
+}
