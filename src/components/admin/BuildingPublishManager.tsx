@@ -30,6 +30,7 @@ type Row = {
 };
 
 type AutomationFilter = "all" | "ready" | "not_ready" | "stale" | "score_pending";
+type SortMode = "workflow" | "published_first" | "readiness" | "name";
 const PAGE_SIZE = 50;
 
 export default function BuildingPublishManager({ buildings }: { buildings: Row[] }) {
@@ -37,12 +38,13 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
   const [visibility, setVisibility] = useState<"all" | "published" | "private">("all");
   const [automationFilter, setAutomationFilter] = useState<AutomationFilter>("all");
   const [keyword, setKeyword] = useState("");
+  const [sortMode, setSortMode] = useState<SortMode>("workflow");
   const [page, setPage] = useState(1);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
   const summary = useMemo(() => ({
-    ready: buildings.filter((b) => !b.deleted_at && b.ready_to_publish).length,
+    ready: buildings.filter((b) => !b.deleted_at && !b.is_published && b.ready_to_publish).length,
     notReady: buildings.filter((b) => !b.deleted_at && !b.ready_to_publish).length,
     stale: buildings.filter((b) => !b.deleted_at && ["stale", "unknown"].includes(b.freshness)).length,
     scorePending: buildings.filter((b) => !b.deleted_at && !b.has_score_recommendation && b.score_status !== "PUBLISHED").length,
@@ -50,17 +52,32 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
 
   const filtered = useMemo(() => {
     const q = keyword.trim().toLowerCase();
-    return buildings.filter((b) => {
+    const rows = buildings.filter((b) => {
       if (visibility === "published" && !b.is_published) return false;
       if (visibility === "private" && b.is_published) return false;
-      if (automationFilter === "ready" && !b.ready_to_publish) return false;
+      if (automationFilter === "ready" && (!b.ready_to_publish || b.is_published)) return false;
       if (automationFilter === "not_ready" && b.ready_to_publish) return false;
       if (automationFilter === "stale" && !["stale", "unknown"].includes(b.freshness)) return false;
       if (automationFilter === "score_pending" && (b.has_score_recommendation || b.score_status === "PUBLISHED")) return false;
       if (q && !`${b.name} ${b.district_name}`.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [buildings, visibility, automationFilter, keyword]);
+
+    return [...rows].sort((a, b) => {
+      if (sortMode === "workflow") {
+        // 운영 기본값: 아직 공개하지 않은 건물을 먼저 모으고, 그 안에서는 공개 준비도가 높은 순.
+        // 안전 공개가 끝난 건물은 자동으로 공개 그룹(목록 뒤쪽)으로 이동한다.
+        if (a.is_published !== b.is_published) return Number(a.is_published) - Number(b.is_published);
+        if (a.ready_to_publish !== b.ready_to_publish) return Number(b.ready_to_publish) - Number(a.ready_to_publish);
+        if (a.readiness_score !== b.readiness_score) return b.readiness_score - a.readiness_score;
+      } else if (sortMode === "published_first") {
+        if (a.is_published !== b.is_published) return Number(b.is_published) - Number(a.is_published);
+      } else if (sortMode === "readiness") {
+        if (a.readiness_score !== b.readiness_score) return b.readiness_score - a.readiness_score;
+      }
+      return a.name.localeCompare(b.name, "ko");
+    });
+  }, [buildings, visibility, automationFilter, keyword, sortMode]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
@@ -68,7 +85,7 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
   const pageIds = pageRows.filter((b) => !b.deleted_at).map((b) => b.id);
   const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.includes(id));
 
-  useEffect(() => { setPage(1); setSelected([]); }, [visibility, automationFilter, keyword]);
+  useEffect(() => { setPage(1); setSelected([]); }, [visibility, automationFilter, keyword, sortMode]);
   useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
 
   const selectedRows = buildings.filter((b) => selected.includes(b.id));
@@ -81,7 +98,7 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
   };
 
   const selectReadyOnPage = () => {
-    const readyIds = pageRows.filter((b) => b.ready_to_publish && !b.deleted_at).map((b) => b.id);
+    const readyIds = pageRows.filter((b) => b.ready_to_publish && !b.is_published && !b.deleted_at).map((b) => b.id);
     setSelected(readyIds);
     setMessage(`현재 페이지의 공개 준비 완료 ${readyIds.length}개를 선택했습니다.`);
   };
@@ -139,7 +156,7 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
   return (
     <>
       <div className="mb-4 grid gap-3 md:grid-cols-4">
-        <button type="button" onClick={() => setAutomationFilter("ready")} className="border border-green-200 bg-green-50 p-4 text-left hover:border-green-500"><p className="text-xs text-green-800">공개 준비 완료</p><p className="mt-1 font-display text-2xl text-green-950">{summary.ready}</p><p className="mt-1 text-[11px] text-green-700">필수정보 + 현재 공실 확인</p></button>
+        <button type="button" onClick={() => setAutomationFilter("ready")} className="border border-green-200 bg-green-50 p-4 text-left hover:border-green-500"><p className="text-xs text-green-800">공개 대기 · 준비 완료</p><p className="mt-1 font-display text-2xl text-green-950">{summary.ready}</p><p className="mt-1 text-[11px] text-green-700">비공개 중 즉시 안전공개 가능한 건물</p></button>
         <button type="button" onClick={() => setAutomationFilter("not_ready")} className="border border-amber-200 bg-amber-50 p-4 text-left hover:border-amber-500"><p className="text-xs text-amber-800">보완 필요</p><p className="mt-1 font-display text-2xl text-amber-950">{summary.notReady}</p><p className="mt-1 text-[11px] text-amber-700">주소·규모·주차·공실 자동 점검</p></button>
         <button type="button" onClick={() => setAutomationFilter("stale")} className="border border-red-200 bg-red-50 p-4 text-left hover:border-red-500"><p className="text-xs text-red-800">재검수 필요</p><p className="mt-1 font-display text-2xl text-red-950">{summary.stale}</p><p className="mt-1 text-[11px] text-red-700">120일 초과 또는 확인일 없음</p></button>
         <button type="button" onClick={() => setAutomationFilter("score_pending")} className="border border-sky-200 bg-sky-50 p-4 text-left hover:border-sky-500"><p className="text-xs text-sky-800">Prime Score 추천 대기</p><p className="mt-1 font-display text-2xl text-sky-950">{summary.scorePending}</p><p className="mt-1 text-[11px] text-sky-700">추천값 미생성 건물</p></button>
@@ -147,7 +164,7 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
 
       <div className="sticky top-0 z-20 mb-4 border border-silver/30 bg-white/95 p-4 shadow-sm backdrop-blur">
         <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-          <div><div className="font-medium text-charcoal">건물 자동화 센터</div><p className="mt-1 text-xs text-silver">목록은 50개씩 나눠 표시합니다. 현재 페이지에서 선택하면 Prime Score 추천 한도와 정확히 맞습니다.</p></div>
+          <div><div className="font-medium text-charcoal">건물 자동화 센터</div><p className="mt-1 text-xs text-silver">기본 정렬은 비공개 건물 → 공개 건물 순입니다. 안전 공개가 끝난 건물은 자동으로 목록 뒤쪽 공개 그룹으로 이동합니다.</p></div>
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={selectReadyOnPage} disabled={pending} className="border border-green-600 bg-green-50 px-3 py-2 text-xs text-green-800 disabled:opacity-40">현재 페이지 준비완료 선택</button>
             <button type="button" onClick={selectScorePendingOnPage} disabled={pending} className="border border-sky-600 bg-sky-50 px-3 py-2 text-xs text-sky-800 disabled:opacity-40">현재 페이지 Score 대기 선택</button>
@@ -157,7 +174,13 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
           </div>
         </div>
 
-        <div className="mt-4 grid gap-2 lg:grid-cols-[minmax(220px,1fr)_repeat(4,auto)]">
+        <div className="mt-4 grid gap-2 lg:grid-cols-[170px_minmax(220px,1fr)_repeat(4,auto)]">
+          <select value={sortMode} onChange={(e) => setSortMode(e.target.value as SortMode)} className="border border-silver/40 bg-white px-3 py-2 text-xs outline-none focus:border-navy" aria-label="건물 목록 정렬">
+            <option value="workflow">업무순서 · 비공개 먼저</option>
+            <option value="published_first">공개 먼저</option>
+            <option value="readiness">준비도 높은순</option>
+            <option value="name">건물명순</option>
+          </select>
           <input value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="건물명 또는 지역 검색" className="border border-silver/40 px-3 py-2 text-sm outline-none focus:border-navy" />
           <button type="button" onClick={() => { setVisibility("all"); setAutomationFilter("all"); }} className={`px-3 py-2 text-xs border ${visibility === "all" && automationFilter === "all" ? "bg-navy text-white border-navy" : "border-silver/40"}`}>전체</button>
           <button type="button" onClick={() => setVisibility("private")} className={`px-3 py-2 text-xs border ${visibility === "private" ? "bg-navy text-white border-navy" : "border-silver/40"}`}>비공개만</button>
