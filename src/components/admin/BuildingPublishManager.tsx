@@ -29,7 +29,7 @@ type Row = {
   active_listing_count: number;
 };
 
-type AutomationFilter = "all" | "ready" | "not_ready" | "stale" | "score_pending";
+type AutomationFilter = "all" | "ready" | "not_ready" | "unmapped" | "stale" | "score_pending";
 type SortMode = "workflow" | "published_first" | "readiness" | "name";
 const PAGE_SIZE = 50;
 
@@ -43,12 +43,19 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
   const [message, setMessage] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
-  const summary = useMemo(() => ({
-    ready: buildings.filter((b) => !b.deleted_at && !b.is_published && b.ready_to_publish).length,
-    notReady: buildings.filter((b) => !b.deleted_at && !b.ready_to_publish).length,
-    stale: buildings.filter((b) => !b.deleted_at && ["stale", "unknown"].includes(b.freshness)).length,
-    scorePending: buildings.filter((b) => !b.deleted_at && !b.has_score_recommendation && b.score_status !== "PUBLISHED").length,
-  }), [buildings]);
+  const summary = useMemo(() => {
+    const active = buildings.filter((b) => !b.deleted_at);
+    return {
+      total: active.length,
+      published: active.filter((b) => b.is_published).length,
+      private: active.filter((b) => !b.is_published).length,
+      unmapped: active.filter((b) => !b.district_name).length,
+      ready: active.filter((b) => !b.is_published && b.ready_to_publish).length,
+      notReady: active.filter((b) => !b.is_published && !b.ready_to_publish).length,
+      stale: active.filter((b) => ["stale", "unknown"].includes(b.freshness)).length,
+      scorePending: active.filter((b) => !b.has_score_recommendation && b.score_status !== "PUBLISHED").length,
+    };
+  }, [buildings]);
 
   const filtered = useMemo(() => {
     const q = keyword.trim().toLowerCase();
@@ -57,6 +64,7 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
       if (visibility === "private" && b.is_published) return false;
       if (automationFilter === "ready" && (!b.ready_to_publish || b.is_published)) return false;
       if (automationFilter === "not_ready" && b.ready_to_publish) return false;
+      if (automationFilter === "unmapped" && b.district_name) return false;
       if (automationFilter === "stale" && !["stale", "unknown"].includes(b.freshness)) return false;
       if (automationFilter === "score_pending" && (b.has_score_recommendation || b.score_status === "PUBLISHED")) return false;
       if (q && !`${b.name} ${b.district_name}`.toLowerCase().includes(q)) return false;
@@ -155,16 +163,26 @@ export default function BuildingPublishManager({ buildings }: { buildings: Row[]
 
   return (
     <>
-      <div className="mb-4 grid gap-3 md:grid-cols-4">
-        <button type="button" onClick={() => setAutomationFilter("ready")} className="border border-green-200 bg-green-50 p-4 text-left hover:border-green-500"><p className="text-xs text-green-800">공개 대기 · 준비 완료</p><p className="mt-1 font-display text-2xl text-green-950">{summary.ready}</p><p className="mt-1 text-[11px] text-green-700">비공개 중 즉시 안전공개 가능한 건물</p></button>
-        <button type="button" onClick={() => setAutomationFilter("not_ready")} className="border border-amber-200 bg-amber-50 p-4 text-left hover:border-amber-500"><p className="text-xs text-amber-800">보완 필요</p><p className="mt-1 font-display text-2xl text-amber-950">{summary.notReady}</p><p className="mt-1 text-[11px] text-amber-700">주소·규모·주차·공실 자동 점검</p></button>
-        <button type="button" onClick={() => setAutomationFilter("stale")} className="border border-red-200 bg-red-50 p-4 text-left hover:border-red-500"><p className="text-xs text-red-800">재검수 필요</p><p className="mt-1 font-display text-2xl text-red-950">{summary.stale}</p><p className="mt-1 text-[11px] text-red-700">120일 초과 또는 확인일 없음</p></button>
-        <button type="button" onClick={() => setAutomationFilter("score_pending")} className="border border-sky-200 bg-sky-50 p-4 text-left hover:border-sky-500"><p className="text-xs text-sky-800">Prime Score 추천 대기</p><p className="mt-1 font-display text-2xl text-sky-950">{summary.scorePending}</p><p className="mt-1 text-[11px] text-sky-700">추천값 미생성 건물</p></button>
+      <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+        <button type="button" onClick={() => { setVisibility("all"); setAutomationFilter("all"); }} className="border border-silver/30 bg-white p-4 text-left hover:border-navy"><p className="text-xs text-silver">전체 정상 건물</p><p className="mt-1 font-display text-2xl text-charcoal">{summary.total}</p><p className="mt-1 text-[11px] text-silver">삭제 제외 운영 대상</p></button>
+        <button type="button" onClick={() => { setVisibility("published"); setAutomationFilter("all"); }} className="border border-green-200 bg-green-50 p-4 text-left hover:border-green-500"><p className="text-xs text-green-800">현재 공개</p><p className="mt-1 font-display text-2xl text-green-950">{summary.published}</p><p className="mt-1 text-[11px] text-green-700">고객 사이트 노출 중</p></button>
+        <button type="button" onClick={() => { setVisibility("private"); setAutomationFilter("all"); }} className="border border-slate-200 bg-slate-50 p-4 text-left hover:border-slate-500"><p className="text-xs text-slate-700">현재 비공개</p><p className="mt-1 font-display text-2xl text-slate-950">{summary.private}</p><p className="mt-1 text-[11px] text-slate-600">검수·공개 작업 대상</p></button>
+        <button type="button" onClick={() => { setVisibility("all"); setAutomationFilter("unmapped"); setKeyword(""); setSortMode("workflow"); }} className={`border p-4 text-left ${summary.unmapped ? "border-red-200 bg-red-50 hover:border-red-500" : "border-silver/30 bg-white hover:border-navy"}`}><p className={`text-xs ${summary.unmapped ? "text-red-800" : "text-silver"}`}>업무권역 미지정</p><p className={`mt-1 font-display text-2xl ${summary.unmapped ? "text-red-950" : "text-charcoal"}`}>{summary.unmapped}</p><p className={`mt-1 text-[11px] ${summary.unmapped ? "text-red-700" : "text-silver"}`}>검색 노출 전 확인 필요</p></button>
+        <button type="button" onClick={() => { setVisibility("private"); setAutomationFilter("ready"); }} className="border border-emerald-200 bg-emerald-50 p-4 text-left hover:border-emerald-500"><p className="text-xs text-emerald-800">공개 대기 · 준비 완료</p><p className="mt-1 font-display text-2xl text-emerald-950">{summary.ready}</p><p className="mt-1 text-[11px] text-emerald-700">최소 공개기준 충족</p></button>
+        <button type="button" onClick={() => { setVisibility("private"); setAutomationFilter("not_ready"); }} className="border border-amber-200 bg-amber-50 p-4 text-left hover:border-amber-500"><p className="text-xs text-amber-800">공개 전 보완 필요</p><p className="mt-1 font-display text-2xl text-amber-950">{summary.notReady}</p><p className="mt-1 text-[11px] text-amber-700">주소·권역·기본규모 점검</p></button>
+      </div>
+
+      <div className="mb-4 flex flex-wrap items-center gap-3 border border-silver/25 bg-white px-4 py-3 text-xs text-silver">
+        <span><b className="text-charcoal">운영 점검</b></span>
+        <button type="button" onClick={() => setAutomationFilter("stale")} className="hover:text-navy">재검수 필요 <b className="text-red-700">{summary.stale}</b></button>
+        <span className="text-silver/50">|</span>
+        <button type="button" onClick={() => setAutomationFilter("score_pending")} className="hover:text-navy">Prime Score 추천 대기 <b className="text-sky-700">{summary.scorePending}</b></button>
+        <span className="ml-auto">공실 0건도 건물정보는 공개 가능 · 공실은 별도 상태로 표시</span>
       </div>
 
       <div className="sticky top-0 z-20 mb-4 border border-silver/30 bg-white/95 p-4 shadow-sm backdrop-blur">
         <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-          <div><div className="font-medium text-charcoal">건물 자동화 센터</div><p className="mt-1 text-xs text-silver">기본 정렬은 비공개 건물 → 공개 건물 순입니다. 안전 공개가 끝난 건물은 자동으로 목록 뒤쪽 공개 그룹으로 이동합니다.</p></div>
+          <div><div className="font-medium text-charcoal">건물 자동화 센터</div><p className="mt-1 text-xs text-silver">기본 정렬은 비공개 → 공개 순입니다. 최소 공개기준은 건물명·주소·업무권역·기본 규모이며, 주차·이미지·Prime Score·공실 0건은 보완 경고로 관리합니다.</p></div>
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={selectReadyOnPage} disabled={pending} className="border border-green-600 bg-green-50 px-3 py-2 text-xs text-green-800 disabled:opacity-40">현재 페이지 준비완료 선택</button>
             <button type="button" onClick={selectScorePendingOnPage} disabled={pending} className="border border-sky-600 bg-sky-50 px-3 py-2 text-xs text-sky-800 disabled:opacity-40">현재 페이지 Score 대기 선택</button>

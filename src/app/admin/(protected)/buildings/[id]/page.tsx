@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import BuildingForm from "@/components/admin/BuildingForm";
@@ -118,7 +119,10 @@ export default async function EditBuildingPage({
 
   return (
     <div>
-      <h1 className="font-display text-2xl mb-6">건물 수정 — {building.name}</h1>
+      <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+        <h1 className="font-display text-2xl">건물 수정 — {building.name}</h1>
+        <Link href={`/admin/content/${id}`} className="border border-navy px-3 py-2 text-xs text-navy hover:bg-navy hover:text-white">네이버 블로그 원고 만들기</Link>
+      </div>
       <BuildingForm
         mode="edit"
         buildingId={id}

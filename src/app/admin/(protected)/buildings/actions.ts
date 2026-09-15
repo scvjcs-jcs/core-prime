@@ -1,5 +1,7 @@
 "use server";
 
+import { getBuildingReadiness } from "@/lib/buildingAutomation";
+
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import type { BuildingParking, BuildingScores, BuildingTransportation } from "@/lib/types";
@@ -523,8 +525,10 @@ export async function bulkGeneratePrimeScoreRecommendations(
   return { generated, failed, messages };
 }
 
-// v1.15 — 공개 준비 완료 건물만 서버에서 다시 검증한 뒤 공개합니다.
-// 최소 기준: 주소, 준공연도, 연면적, 지상층수, 주차대수, 현재 공실 1건 이상.
+// v1.22.1 — 공개 준비 완료 건물만 서버에서 다시 검증한 뒤 공개합니다.
+// 공개 필수 기준은 고객이 건물을 식별/검색/비교할 수 있는 최소 정보로 제한합니다.
+// 필수: 건물명, 주소, 업무권역, 기본 규모(연면적 또는 지상층수).
+// 준공/주차/교통/이미지/Prime Score/현재 공실은 공개 품질 경고로 관리하되 건물 공개 자체를 막지 않습니다.
 export async function bulkPublishReadyBuildings(
   buildingIds: string[]
 ): Promise<{ error?: string; published?: number; blocked?: number; blockedNames?: string[] }> {
@@ -536,28 +540,55 @@ export async function bulkPublishReadyBuildings(
   const { data: admin } = await supabase.from("admins").select("id,is_active").eq("id", user.id).maybeSingle();
   if (!admin?.is_active) return { error: "관리자 권한이 필요합니다." };
 
-  const [{ data: rows, error: buildingError }, { data: parkingRows }, { data: listingRows }] = await Promise.all([
-    supabase.from("buildings").select("id,name,road_address,address,completion_year,gross_floor_area,above_ground_floors,deleted_at").in("id", ids),
+  const [buildingRes, parkingRes, transportRes, imagesRes, listingsRes, scoresRes, recsRes] = await Promise.all([
+    supabase.from("buildings").select("id,name,district_id,road_address,address,completion_year,gross_floor_area,above_ground_floors,basement_floors,elevator_count,efficiency_ratio,data_last_verified_at,deleted_at,districts(name)").in("id", ids),
     supabase.from("building_parking").select("building_id,total_spaces").in("building_id", ids),
-    supabase.from("listings").select("building_id").in("building_id", ids).in("status", ["available", "negotiating"]),
+    supabase.from("building_transportation").select("building_id").in("building_id", ids),
+    supabase.from("building_images").select("building_id").in("building_id", ids),
+    supabase.from("listings").select("building_id").in("building_id", ids).in("status", ["available", "negotiating", "contracting"]),
+    supabase.from("building_scores").select("building_id,status").in("building_id", ids),
+    supabase.from("prime_score_recommendations").select("building_id").in("building_id", ids),
   ]);
-  if (buildingError) return { error: buildingError.message };
+  if (buildingRes.error) return { error: buildingRes.error.message };
 
-  const parking = new Map<string, number | null>((parkingRows ?? []).map((x: { building_id: string; total_spaces: number | null }) => [x.building_id, x.total_spaces]));
-  const listingCounts = new Map<string, number>();
-  for (const x of listingRows ?? []) listingCounts.set(x.building_id, (listingCounts.get(x.building_id) ?? 0) + 1);
+  const parking = new Map<string, number | null>((parkingRes.data ?? []).map((x: any) => [x.building_id, x.total_spaces]));
+  const transportCount = new Map<string, number>();
+  for (const x of transportRes.data ?? []) transportCount.set(x.building_id, (transportCount.get(x.building_id) ?? 0) + 1);
+  const imageCount = new Map<string, number>();
+  for (const x of imagesRes.data ?? []) imageCount.set(x.building_id, (imageCount.get(x.building_id) ?? 0) + 1);
+  const listingCount = new Map<string, number>();
+  for (const x of listingsRes.data ?? []) listingCount.set(x.building_id, (listingCount.get(x.building_id) ?? 0) + 1);
+  const scoreStatus = new Map((scoresRes.data ?? []).map((x: any) => [x.building_id, x.status]));
+  const recommendationIds = new Set((recsRes.data ?? []).map((x: any) => x.building_id));
 
   const readyIds: string[] = [];
   const blockedNames: string[] = [];
-  for (const b of rows ?? []) {
-    const ok = !b.deleted_at
-      && Boolean((b.road_address ?? b.address ?? "").trim())
-      && b.completion_year != null
-      && b.gross_floor_area != null && Number(b.gross_floor_area) > 0
-      && b.above_ground_floors != null && b.above_ground_floors > 0
-      && (parking.get(b.id) ?? 0) > 0
-      && (listingCounts.get(b.id) ?? 0) > 0;
-    if (ok) readyIds.push(b.id); else if (blockedNames.length < 20) blockedNames.push(b.name ?? b.id);
+  for (const b of buildingRes.data ?? []) {
+    if (b.deleted_at) continue;
+    const districtRel = b.districts as unknown as { name?: string | null } | { name?: string | null }[] | null;
+    const districtName = Array.isArray(districtRel) ? districtRel[0]?.name ?? null : districtRel?.name ?? null;
+    const readiness = getBuildingReadiness({
+      name: b.name,
+      road_address: b.road_address,
+      address: b.address,
+      district_id: b.district_id,
+      district_name: districtName,
+      completion_year: b.completion_year,
+      gross_floor_area: b.gross_floor_area == null ? null : Number(b.gross_floor_area),
+      above_ground_floors: b.above_ground_floors,
+      basement_floors: b.basement_floors,
+      elevator_count: b.elevator_count,
+      efficiency_ratio: b.efficiency_ratio == null ? null : Number(b.efficiency_ratio),
+      data_last_verified_at: b.data_last_verified_at,
+      parking_total: parking.get(b.id) ?? null,
+      transportation_count: transportCount.get(b.id) ?? 0,
+      image_count: imageCount.get(b.id) ?? 0,
+      active_listing_count: listingCount.get(b.id) ?? 0,
+      score_status: scoreStatus.get(b.id) ?? null,
+      has_score_recommendation: recommendationIds.has(b.id),
+    });
+    if (readiness.ready) readyIds.push(b.id);
+    else if (blockedNames.length < 20) blockedNames.push(`${b.name ?? b.id} (${readiness.blockers.join(", ")})`);
   }
 
   if (readyIds.length > 0) {

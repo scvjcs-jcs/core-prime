@@ -23,7 +23,7 @@ export default async function AdminBuildingsPage({
 
   let query = supabase
     .from("buildings")
-    .select("id, name, status, is_published, completion_year, gross_floor_area, above_ground_floors, basement_floors, elevator_count, efficiency_ratio, road_address, address, data_last_verified_at, created_at, deleted_at, districts(name)")
+    .select("id, name, status, is_published, district_id, completion_year, gross_floor_area, above_ground_floors, basement_floors, elevator_count, efficiency_ratio, road_address, address, data_last_verified_at, created_at, deleted_at, districts(name)")
     .order("created_at", { ascending: false });
 
   if (filter === "active") query = query.is("deleted_at", null);
@@ -37,7 +37,7 @@ export default async function AdminBuildingsPage({
         supabase.from("building_parking").select("building_id,total_spaces").in("building_id", ids),
         supabase.from("building_transportation").select("building_id").in("building_id", ids),
         supabase.from("building_images").select("building_id").in("building_id", ids),
-        supabase.from("listings").select("building_id").in("building_id", ids).in("status", ["available", "negotiating"]),
+        supabase.from("listings").select("building_id").in("building_id", ids).in("status", ["available", "negotiating", "contracting"]),
         supabase.from("building_scores").select("building_id,status").in("building_id", ids),
         supabase.from("prime_score_recommendations").select("building_id").in("building_id", ids),
       ])
@@ -65,6 +65,8 @@ export default async function AdminBuildingsPage({
       elevator_count: b.elevator_count,
       efficiency_ratio: b.efficiency_ratio == null ? null : Number(b.efficiency_ratio),
       data_last_verified_at: b.data_last_verified_at,
+      district_id: b.district_id,
+      district_name: (b.districts as unknown as { name: string } | null)?.name ?? null,
       parking_total: parking.get(b.id) ?? null,
       transportation_count: transportCount.get(b.id) ?? 0,
       image_count: imageCount.get(b.id) ?? 0,
