@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { enrichCbreBuildingFacts } from "@/app/admin/(protected)/imports/actions";
+import { enrichCbreBuildingFacts, getCbreBuildingFactsEnrichmentProgress } from "@/app/admin/(protected)/imports/actions";
 
 type Totals = {
   matched: number;
@@ -10,6 +10,8 @@ type Totals = {
   parking: number;
   transport: number;
   skipped: number;
+  corrected: number;
+  review: number;
 };
 
 export default function BuildingFactsEnrichmentButton({ sourceDocumentId, parserType }: { sourceDocumentId: string; parserType: string | null }) {
@@ -24,7 +26,7 @@ export default function BuildingFactsEnrichmentButton({ sourceDocumentId, parser
       <div>
         <p className="text-sm font-medium text-sky-950">CBRE 건물 기본정보 보강</p>
         <p className="mt-1 text-xs leading-5 text-sky-800">연면적·규모·전용률·엘리베이터·주차·무료/유료주차·기준층 면적을 원문에서 다시 읽어 이미 등록된 건물의 빈 항목만 채웁니다. 기존 수동 입력값은 덮어쓰지 않습니다.</p>
-        <p className="mt-1 text-[11px] text-sky-700">대용량 자료는 12개 건물씩 안전하게 나눠 처리합니다. 중간 오류가 나도 이미 반영된 값은 유지되며 다시 실행해도 빈 값만 채웁니다.</p>
+        <p className="mt-1 text-[11px] text-sky-700">12개씩 원본 페이지만 읽어 처리합니다. 중간 연결이 끊기면 마지막 완료 지점부터 이어서 재개하며, 이전 자동추출값이 잘못된 경우에만 안전하게 교정합니다.</p>
       </div>
       <button disabled={pending} onClick={() => {
         if (!confirm("CBRE 원문에서 건물 기본정보를 다시 읽어 빈 항목만 보강할까요? 기존에 입력된 값은 유지됩니다.")) return;
@@ -32,8 +34,12 @@ export default function BuildingFactsEnrichmentButton({ sourceDocumentId, parser
           setMessage("");
           setProgress({ done: 0, total: 0 });
           let offset = 0;
-          const totals: Totals = { matched: 0, updated: 0, parking: 0, transport: 0, skipped: 0 };
+          const totals: Totals = { matched: 0, updated: 0, parking: 0, transport: 0, skipped: 0, corrected: 0, review: 0 };
           try {
+            const saved = await getCbreBuildingFactsEnrichmentProgress(sourceDocumentId);
+            if (saved.error) { setMessage(`오류: ${saved.error}`); return; }
+            offset = saved.nextOffset ?? 0;
+            setProgress({ done: offset, total: saved.totalBuildings ?? 0 });
             // Keep each server action below serverless execution limits. The server caps limit <= 20.
             for (let guard = 0; guard < 100; guard += 1) {
               const r = await enrichCbreBuildingFacts(sourceDocumentId, offset, 12);
@@ -46,12 +52,14 @@ export default function BuildingFactsEnrichmentButton({ sourceDocumentId, parser
               totals.parking += r.parkingUpdated ?? 0;
               totals.transport += r.transportAdded ?? 0;
               totals.skipped += r.skipped ?? 0;
+              totals.corrected += r.correctedBuildings ?? 0;
+              totals.review += r.reviewNeeded ?? 0;
 
               const next = r.nextOffset ?? r.processedTo ?? offset;
               const total = r.totalBuildings ?? r.parsedBuildings ?? 0;
               setProgress({ done: next, total });
               if (r.done || next >= total) {
-                setMessage(`완료 · 원문 건물 ${total} · 연결 ${totals.matched} · 건물정보 보강 ${totals.updated} · 주차정보 ${totals.parking} · 교통정보 ${totals.transport} · 보류 ${totals.skipped}`);
+                setMessage(`완료 · 원문 건물 ${total} · 연결 ${totals.matched} · 보강 ${totals.updated} · 이전 자동값 교정 ${totals.corrected} · 주차 ${totals.parking} · 교통 ${totals.transport} · 원문 수치 검토필요 ${totals.review} · 보류 ${totals.skipped}`);
                 router.refresh();
                 return;
               }

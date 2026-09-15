@@ -77,6 +77,11 @@ export async function generateMetadata({
   };
 }
 
+
+function formatWonAmount(value: number | null | undefined) {
+  if (value == null) return null;
+  return `${Number(value).toLocaleString("ko-KR")}원`;
+}
 const SCORE_LABELS: [string, string][] = [
   ["location_score", "입지"],
   ["transportation_score", "교통"],
@@ -233,10 +238,11 @@ export default async function BuildingDetailPage({
                         {l.floor ?? "층 미정"} · {l.exclusive_area_py ? `전용 ${Number(l.exclusive_area_py).toLocaleString()}평` : l.exclusive_area ? `전용 ${Number(l.exclusive_area).toLocaleString()}㎡` : "면적 문의"}
                       </p>
                       <p className="text-silver text-xs mt-1">
-                        {l.rent_per_py ? `평당 임대료 ${Number(l.rent_per_py).toLocaleString()}원` : l.monthly_rent ? `월 임대료 ${Number(l.monthly_rent).toLocaleString()}만원` : "임대료 문의"}
-                        {l.maintenance_per_py ? ` · 관리비 ${Number(l.maintenance_per_py).toLocaleString()}원/평` : ""}
+                        {l.rent_per_py ? `평당 임대료 ${Number(l.rent_per_py).toLocaleString()}원` : l.monthly_rent_total_won ? `월 임대료 ${formatWonAmount(l.monthly_rent_total_won)}` : l.monthly_rent ? `월 임대료 ${Number(l.monthly_rent).toLocaleString()}만원` : "임대료 문의"}
+                        {l.maintenance_per_py ? ` · 관리비 ${Number(l.maintenance_per_py).toLocaleString()}원/평` : l.management_fee_total_won ? ` · 월 관리비 ${formatWonAmount(l.management_fee_total_won)}` : ""}
                         {l.noc_per_py ? ` · NOC ${Number(l.noc_per_py).toLocaleString()}원/평` : ""}
                       </p>
+                      {(l.deposit_per_py || l.deposit_total_won) && <p className="text-silver text-xs mt-1">보증금 {l.deposit_per_py ? `${Number(l.deposit_per_py).toLocaleString()}원/평` : formatWonAmount(l.deposit_total_won)}</p>}
                       <p className="text-silver text-xs mt-1">입주 {l.move_in_text ?? l.available_date ?? "협의"}{l.report_date ? ` · 기준 ${l.report_date}` : ""}</p>
                     </div>
                     <span className="text-xs text-navy bg-fog px-2 py-0.5 border border-silver/30">

@@ -1,6 +1,6 @@
 import type { ExtractedField, ParsedBuilding, ParsedListing, ParserPage, ParserResult } from "../types";
 
-export const CBRE_PARSER_VERSION = "CBRE-v1.14.3";
+export const CBRE_PARSER_VERSION = "CBRE-v1.14.5";
 
 const f = <T>(value: T | null, raw: string | null, page: number, confidence: number): ExtractedField<T> => ({
   value,
@@ -294,18 +294,212 @@ function sliceLabelValue(joined: string, label: string, stopLabels: string[]): s
   return joined.match(re)?.[1]?.trim() ?? null;
 }
 
+function extractParkingRule(joined: string, kind: "FREE" | "PAID"): string | null {
+  const label = kind === "FREE" ? "무료주차" : "유료주차";
+  const idx = joined.search(new RegExp(label, "i"));
+  if (idx < 0) return null;
+
+  const previousBoundary = (labels: string[]) => {
+    let best = Math.max(0, idx - 180);
+    for (const l of labels) {
+      const p = joined.lastIndexOf(l, idx - 1);
+      if (p >= 0) best = Math.max(best, p + l.length);
+    }
+    return best;
+  };
+  const nextBoundary = (labels: string[]) => {
+    let best = Math.min(joined.length, idx + label.length + 220);
+    for (const l of labels) {
+      const p = joined.indexOf(l, idx + label.length);
+      if (p >= 0) best = Math.min(best, p);
+    }
+    return best;
+  };
+
+  const left = kind === "FREE"
+    ? previousBoundary(["주차대수", "기준층", "전용률"])
+    : previousBoundary(["무료주차", "기준층"]);
+  const right = kind === "FREE"
+    ? nextBoundary(["유료주차", "Availabilities", "Floorplan", "CBRE Contacts"])
+    : nextBoundary(["Availabilities", "Floorplan", "CBRE Contacts"]);
+  const context = joined.slice(left, right);
+  const labelLocal = idx - left;
+
+  const patterns = kind === "FREE" ? [
+    /(?:임대면적\s*)?[\d,.]+\s*(?:평|㎡)\s*당\s*[\d,.]+\s*대(?:\s*제공)?(?:\s*\([^)]{0,80}\))?/gi,
+    /(?:임대면적\s*)?[\d,.]+\s*(?:평|㎡)당\s*[\d,.]+\s*대(?:\s*제공)?(?:\s*\([^)]{0,80}\))?/gi,
+    /층\s*당\s*[\d,.]+\s*대(?:\s*제공)?(?:\s*\([^)]{0,80}\))?/gi,
+    /층당\s*[\d,.]+\s*대(?:\s*제공)?(?:\s*\([^)]{0,80}\))?/gi,
+    /층\s*\/\s*[\d,.]+\s*대/gi,
+    /[\d,.]+\s*대\s*\/\s*층/gi,
+    /총\s*[\d,.]+\s*대(?:\s*\([^)]{0,80}\))?/gi,
+    /(?:추후\s*)?협의(?:필요)?/gi,
+    /추후\s*확정/gi,
+    /(?:미제공|해당없음|없음|불가)/gi,
+  ] : [
+    /[\d,]+\s*원\s*\/\s*대(?:\s*\([^)]{0,80}\))?/gi,
+    /[\d,]+\s*원\s*\/\s*(?:월|month)(?:\s*\([^)]{0,80}\))?/gi,
+    /(?:추후\s*)?협의(?:필요)?/gi,
+    /추후\s*확정/gi,
+    /(?:미제공|해당없음|없음|불가)/gi,
+  ];
+
+  const hits: Array<{ value: string; distance: number; priority: number }> = [];
+  patterns.forEach((re, priority) => {
+    for (const m of context.matchAll(re)) {
+      const mi = m.index ?? 0;
+      const center = mi + m[0].length / 2;
+      hits.push({ value: m[0].replace(/\s+/g, " ").trim(), distance: Math.abs(center - labelLocal), priority });
+    }
+  });
+  if (!hits.length) return null;
+  hits.sort((a, b) => a.priority - b.priority || a.distance - b.distance);
+  return hits[0].value;
+}
+
+function parseElevatorFacts(text: string, joined: string): { total: string | null; detail: string | null } {
+  const rawLines = text.split(/\r?\n/).map((x) => x.trim());
+  const li = rawLines.findIndex((x) => /엘리베이터/.test(x));
+  let total: string | null = null;
+  let detailSource = "";
+
+  if (li >= 0) {
+    const line = rawLines[li] ?? "";
+    const afterLabel = line.split(/엘리베이터(?:\s*대수)?/i)[1] ?? "";
+    const direct = afterLabel.match(/(?:총\s*)?([\d,]+)\s*대/i)?.[1] ?? null;
+    if (direct) total = direct;
+
+    if (!total) {
+      for (let k = li - 1; k >= Math.max(0, li - 2); k -= 1) {
+        const prev = rawLines[k]?.trim() ?? "";
+        if (!prev) continue;
+        // The total can start a wrapped line such as `48대 (승객 40대-...`.
+        // Prefer that leading total even when the parenthetical detail continues on later lines.
+        const lone = prev.match(/^(?:총\s*)?([\d,]+)\s*대(?=\s|\(|$)/i)?.[1] ?? null;
+        if (lone) { total = lone; break; }
+        break;
+      }
+    }
+
+    // PDF text order can place the elevator value on the next visual row while the
+    // parking value appears only 2-3 text rows later. Stop the local elevator window
+    // before parking/efficiency labels so parking counts can never become elevator counts.
+    const elevatorLines: string[] = [];
+    for (let k = li; k < Math.min(rawLines.length, li + 6); k += 1) {
+      const candidate = rawLines[k] ?? "";
+      if (k > li && /(?:전용률|주차대수|무료주차|유료주차|기준층|Availabilities)/i.test(candidate)) break;
+      elevatorLines.push(candidate);
+    }
+    const nearby = elevatorLines.join(" ");
+    detailSource = nearby;
+    if (!total) {
+      // Multi-wing layouts may have no explicit total (e.g. 사무동 1대, C&F동 1대).
+      // Sum named components before falling back to the first plain count.
+      const roleCounts = [...nearby.matchAll(/(?:승객(?:용)?|승용|비상(?:용)?|화물(?:용)?|셔틀(?:용)?|사무동|C&F동|본관|신관)\s*([\d,]+)\s*대/gi)]
+        .map((m) => n(m[1])).filter((x): x is number => x !== null);
+      if (roleCounts.length >= 2) total = String(roleCounts.reduce((a, b) => a + b, 0));
+    }
+    if (!total) {
+      const explicitTotal = nearby.match(/총\s*([\d,]+)\s*대/i)?.[1] ?? null;
+      if (explicitTotal) total = explicitTotal;
+    }
+    if (!total) {
+      // The first count after the elevator label is the visual elevator total on standard pages.
+      // This is deliberately "first", so a parking number emitted a row later cannot win.
+      total = nearby.match(/([\d,]+)\s*대/i)?.[1] ?? null;
+    }
+  }
+
+  if (!total) {
+    const idx = joined.search(/엘리베이터(?:\s*대수)?/i);
+    if (idx >= 0) {
+      const raw = joined.slice(idx, Math.min(joined.length, idx + 240));
+      const stop = raw.search(/\s(?:전용률|주차대수|무료주차|유료주차|기준층|Availabilities)(?:\s|$)/i);
+      const window = (stop > 0 ? raw.slice(0, stop) : raw).replace(/^엘리베이터(?:\s*대수)?\s*/i, "").trim();
+      detailSource ||= window;
+      const leading = window.match(/^(?:총\s*)?([\d,]+)\s*대/i)?.[1] ?? null;
+      if (leading) total = leading;
+      else {
+        const beforeBare = window.split(/\s대수\s/i)[0];
+        const roleCounts = [...beforeBare.matchAll(/(?:승객(?:용)?|승용|비상(?:용)?|화물(?:용)?|셔틀(?:용)?|사무동|C&F동|본관|신관)\s*([\d,]+)\s*대/gi)]
+          .map((m) => n(m[1])).filter((x): x is number => x !== null);
+        if (roleCounts.length) total = String(roleCounts.reduce((a, b) => a + b, 0));
+      }
+    }
+  }
+
+  const passenger = detailSource.match(/(?:승객(?:용)?|승용)\s*([\d,]+)\s*대/i)?.[1] ?? null;
+  const shuttle = detailSource.match(/셔틀(?:용)?\s*([\d,]+)\s*대/i)?.[1] ?? null;
+  const emergency = detailSource.match(/비상(?:용)?\s*([\d,]+)\s*대/i)?.[1] ?? null;
+  const freight = detailSource.match(/화물(?:용)?\s*([\d,]+)\s*대/i)?.[1] ?? null;
+  const parts = [
+    passenger ? `승객용 ${passenger}대` : null,
+    shuttle ? `셔틀용 ${shuttle}대` : null,
+    emergency ? `비상용 ${emergency}대` : null,
+    freight ? `화물용 ${freight}대` : null,
+  ].filter(Boolean);
+  const detail = total ? `총 ${total}대${parts.length ? ` (${parts.join(", ")})` : ""}` : null;
+  return { total, detail };
+}
+
+function parseParkingTotal(text: string, joined: string): string | null {
+  const rawLines = text.split(/\r?\n/).map((x) => x.trim());
+  const li = rawLines.findIndex((x) => /주차대수/.test(x));
+  if (li >= 0) {
+    const line = rawLines[li] ?? "";
+    const after = line.split(/주차대수/i)[1] ?? "";
+    const direct = after.match(/^\s*(?:총\s*)?([\d,]+)\s*대/i)?.[1] ?? null;
+    if (direct) return direct;
+
+    const neighborhood = [rawLines[li - 1] ?? "", line, rawLines[li + 1] ?? ""].join(" ");
+
+    // In several CBRE pages the visual total is emitted on the line immediately BEFORE the
+    // `주차대수` label, while the breakdown sits after the label. Prefer that standalone total.
+    for (let k = li - 1; k >= Math.max(0, li - 2); k -= 1) {
+      const prev = rawLines[k]?.trim() ?? "";
+      if (!prev) continue;
+      const lone = prev.match(/^(?:총\s*)?([\d,]+)\s*대(?:\s*\([^)]*)?$/i)?.[1] ?? null;
+      if (lone) return lone;
+      const leadingTotal = prev.match(/^(?:총\s*)?([\d,]+)\s*대(?=\s|\(|$)/i)?.[1] ?? null;
+      if (leadingTotal) return leadingTotal;
+      break;
+    }
+
+    // Some pages write only a parking type after the label, e.g. `주차대수 기계식 25대`.
+    // Use it only after checking for a visual total on the previous row.
+    const afterRoleCounts = [...after.matchAll(/(?:자주식|기계식|본관|신관|주차\s*타워|주차빌딩|업무시설|근린생활시설|옥내|옥외)\s*([\d,]+)\s*대/gi)]
+      .map((m) => n(m[1])).filter((x): x is number => x !== null);
+    if (afterRoleCounts.length) return String(afterRoleCounts.reduce((a, b) => a + b, 0));
+
+    const explicit = neighborhood.match(/(?:총\s*)?([\d,]+)\s*대\s*\([^)]*(?:자주식|기계식|본관|신관|업무시설|근린생활|옥내|옥외)/i)?.[1] ?? null;
+    if (explicit) return explicit;
+
+    const roleCounts = [...neighborhood.matchAll(/(?:자주식|기계식|본관|신관|주차\s*타워|주차빌딩|업무시설|근린생활시설|옥내|옥외)\s*([\d,]+)\s*대/gi)]
+      .map((m) => n(m[1])).filter((x): x is number => x !== null);
+    if (roleCounts.length >= 2) return String(roleCounts.reduce((a, b) => a + b, 0));
+  }
+
+  const pidx = joined.search(/주차대수/i);
+  if (pidx < 0) return null;
+  const after = joined.slice(pidx + "주차대수".length, Math.min(joined.length, pidx + "주차대수".length + 150));
+  const direct = after.match(/^\s*(?:총\s*)?([\d,]+)\s*대/i)?.[1] ?? null;
+  if (direct) return direct;
+  const before = joined.slice(Math.max(0, pidx - 180), pidx);
+  const explicit = before.match(/(?:총\s*)?([\d,]+)\s*대\s*\([^)]*(?:자주식|기계식|본관|신관|업무시설|근린생활|옥내|옥외)/i)?.[1] ?? null;
+  if (explicit) return explicit;
+  const previous = [...before.matchAll(/(?:총\s*)?([\d,]+)\s*대/gi)];
+  return previous.length ? previous[previous.length - 1][1] : null;
+}
+
 function parseBuildingFacts(text: string, page: number) {
   const joined = linesOf(text).join(" ").replace(/\s{2,}/g, " ");
   const address = joined.match(/주소\s+(.+?)(?=\s+지하철역|\s+연면적|\s+준공년도|\s+규모)/i)?.[1]?.trim() ?? null;
 
-  // 지하철 정보는 PDF 열 순서 때문에 주소/연면적 값이 섞이기 쉽습니다.
-  // `N호선 ...역 ...` 패턴만 직접 수집해 오염된 텍스트를 교통정보로 저장하지 않도록 합니다.
-  const stationMatches = [...text.matchAll(/(?:\d+(?:,\d+)*호선|[가-힣A-Za-z]+선)\s+[가-힣A-Za-z0-9·]+역(?:\s*(?:직접\s*연결|지하\s*연결|도보\s*\d+(?:~\d+)?분(?:\s*내외)?|도보\s*\d+분\s*이내))?/gi)]
-    .map((m) => m[0].replace(/\s+/g, " ").trim());
+  // Collect only station-shaped phrases so table/address fragments cannot leak into transportation.
+  const stationMatches = [...text.matchAll(/(?:\d+(?:\s*,\s*\d+)*호선|[가-힣A-Za-z]+선)\s+[가-힣A-Za-z0-9·]+역(?:\s*(?:직접\s*연결|지하\s*연결|도보\s*\d+(?:~\d+)?분(?:\s*내외)?|도보\s*\d+분\s*이내))?/gi)]
+    .map((m) => m[0].replace(/\s+/g, " ").replace(/\s*,\s*/g, ",").trim());
   const subway = stationMatches.length ? [...new Set(stationMatches)].slice(0, 3).join(" / ") : null;
 
-  // 일반정보 표의 값은 열 배치 때문에 라벨 다음 줄로 밀릴 수 있습니다.
-  // 같은 줄 패턴을 우선하고, 실패하면 제한된 raw-text window 안에서 재탐색합니다.
   const gfaInline = joined.match(/연면적\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\)/i);
   const gfaLabelPos = text.search(/연면적/i);
   const gfaWindow = gfaLabelPos >= 0 ? text.slice(Math.max(0, gfaLabelPos - 260), Math.min(text.length, gfaLabelPos + 360)) : "";
@@ -317,49 +511,25 @@ function parseBuildingFacts(text: string, page: number) {
     return Math.abs(ii - labelInWindow) < Math.abs(bi - labelInWindow) ? item : best;
   }) : null;
   const gfa = gfaInline ?? gfaNearby;
+
   const completion = joined.match(/준공년도\s+(\d{4})(?:년(?:\s*(\d{1,2})월)?)?/i);
-  const scale = joined.match(/규모\s+(?:지하\s*)?B?(\d+)\s*\/\s*(?:지상\s*)?(\d+)F/i)
-    ?? joined.match(/규모\s+B(\d+)\s*\/\s*(\d+)F/i);
-  const exclusiveRatio = joined.match(/전용률\s+([\d.]+)\s*%/i);
-  const parking = joined.match(/주차대수\s+(?:총\s*)?([\d,]+)대/i)?.[1] ?? null;
+  const scaleMatches = [...joined.matchAll(/(?:사무동\s*|C&F동\s*|[A-Z가-힣0-9]+동\s*)?B(\d+)\s*\/\s*(\d+)F/gi)];
+  // A single canonical B/F pair is safe. Multiple wing-specific scales are preserved in raw staging only.
+  const scale = scaleMatches.length === 1 ? scaleMatches[0] : null;
+  const exclusiveRatio = joined.match(/전용률\s+(?:약\s*)?([\d.]+)\s*%/i);
 
-  const elevatorWindow = joined.match(/엘리베이터(?:\s*대수)?\s+(.{0,220}?)(?=\s+주차대수|\s+무료주차|\s+유료주차|\s+기준층|\s+전용률|\s+Availabilities|$)/i)?.[1]?.trim() ?? null;
-  const elevatorTotal = (elevatorWindow ?? joined).match(/(?:총\s*)?([\d,]+)대/i)?.[1] ?? null;
-  const passengerElevators = (elevatorWindow ?? joined).match(/승객용\s*([\d,]+)대/i)?.[1] ?? null;
-  const shuttleElevators = (elevatorWindow ?? joined).match(/셔틀(?:용)?\s*([\d,]+)대/i)?.[1] ?? null;
-  const emergencyElevators = (elevatorWindow ?? joined).match(/비상용\s*([\d,]+)대/i)?.[1] ?? null;
-  const elevatorParts = [
-    passengerElevators ? `승객용 ${passengerElevators}대` : null,
-    shuttleElevators ? `셔틀용 ${shuttleElevators}대` : null,
-    emergencyElevators ? `비상용 ${emergencyElevators}대` : null,
-  ].filter(Boolean);
-  const elevatorDetail = elevatorTotal ? `총 ${elevatorTotal}대${elevatorParts.length ? ` (${elevatorParts.join(", ")})` : ""}` : null;
+  const parking = parseParkingTotal(text, joined);
 
-  const cleanParkingText = (value: string | null, kind: "FREE" | "PAID") => {
-    if (!value) return null;
-    const v = value.replace(/\s+(?:임대면적|전용면적)\s*$/i, "").trim();
-    if (/추후\s*확정/i.test(v)) return "추후 확정";
-    if (kind === "FREE") {
-      const m = v.match(/(?:임대면적\s*)?[\d,.]+\s*평당\s*[\d,.]+대/i);
-      if (m) return m[0].trim();
-    } else {
-      const m = v.match(/[\d,]+원\s*\/\s*대(?:\s*\([^)]*VAT[^)]*\))?/i);
-      if (m) return m[0].trim();
-    }
-    return v.length <= 80 ? v : v.slice(0, 80).trim();
-  };
-  const freeParking = cleanParkingText(sliceLabelValue(joined, "무료주차", ["유료주차", "Availabilities", "Floorplan", "CBRE Contacts", "기준층", "입주가능시기"]), "FREE");
-  const paidParking = cleanParkingText(sliceLabelValue(joined, "유료주차", ["Availabilities", "Floorplan", "CBRE Contacts", "기준층", "입주가능시기"]), "PAID");
+  const elevator = parseElevatorFacts(text, joined);
+  const freeParking = extractParkingRule(joined, "FREE");
+  const paidParking = extractParkingRule(joined, "PAID");
 
-  // CBRE 일반정보 표는 PDF 읽기 순서에 따라 `기준층 -> 면적 -> 무료주차 -> 임대면적`처럼
-  // 열 라벨이 면적값 뒤에 배치되기도 합니다. 일반형과 interleaved형을 둘 다 지원합니다.
   const typicalLeaseNormal = joined.match(/기준층\s*임대면적\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\)/i);
   const typicalExclusiveNormal = joined.match(/기준층\s*전용면적\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\)/i);
   const interleaved = joined.match(/기준층\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\).*?임대면적\s+기준층\s+([\d,.]+)\s*㎡\s*\(([\d,.]+)\s*평\).*?전용면적/i);
-  const typicalLeaseRaw = text.match(/기준층\s+([\d,.]+)\s*㎡[\s\S]{0,180}?임대면적\s+\(([\d,.]+)\s*평\)/i);
-  const typicalExclusiveRaw = text.match(/기준층\s+([\d,.]+)\s*㎡[\s\S]{0,180}?전용면적\s+\(([\d,.]+)\s*평\)/i);
+  const typicalLeaseRaw = text.match(/기준층\s+([\d,.]+)\s*㎡[\s\S]{0,120}?임대면적\s+\(([\d,.]+)\s*평\)/i);
+  const typicalExclusiveRaw = text.match(/기준층\s+([\d,.]+)\s*㎡[\s\S]{0,120}?전용면적\s+\(([\d,.]+)\s*평\)/i);
 
-  // 라벨과 평 값이 서로 다른 행에 배치된 CBRE 표(예: 그랑서울)를 line-aware 방식으로 보완합니다.
   const rawLines = text.split(/\r?\n/);
   const typicalByLines: Array<{ kind: "LEASE" | "EXCLUSIVE"; sqm: string; py: string }> = [];
   for (let li = 0; li < rawLines.length; li += 1) {
@@ -382,7 +552,7 @@ function parseBuildingFacts(text: string, page: number) {
 
   return {
     road_address: f(address, address, page, address ? 0.92 : 0),
-    subway_access_text: f(subway, subway, page, subway ? 0.82 : 0),
+    subway_access_text: f(subway, subway, page, subway ? 0.88 : 0),
     gross_floor_area_sqm: f(n(gfa?.[1]), gfa?.[1] ?? null, page, gfa?.[1] ? 0.96 : 0),
     gross_floor_area_py: f(n(gfa?.[2]), gfa?.[2] ?? null, page, gfa?.[2] ? 0.96 : 0),
     completion_year: f(n(completion?.[1]), completion?.[0] ?? null, page, completion?.[1] ? 0.95 : 0),
@@ -391,11 +561,11 @@ function parseBuildingFacts(text: string, page: number) {
     above_ground_floors: f(n(scale?.[2]), scale?.[0] ?? null, page, scale?.[2] ? 0.94 : 0),
     efficiency_ratio: f(n(exclusiveRatio?.[1]), exclusiveRatio?.[0] ?? null, page, exclusiveRatio?.[1] ? 0.94 : 0),
     exclusive_ratio_text: f(exclusiveRatio?.[0] ?? null, exclusiveRatio?.[0] ?? null, page, exclusiveRatio?.[1] ? 0.9 : 0),
-    elevator_count: f(n(elevatorTotal), elevatorWindow, page, elevatorTotal ? 0.88 : 0),
-    elevator_detail: f(elevatorDetail, elevatorWindow, page, elevatorDetail ? 0.9 : 0),
-    parking_total: f(n(parking), parking, page, parking ? 0.9 : 0),
-    free_parking_text: f(freeParking, freeParking, page, freeParking ? 0.82 : 0),
-    paid_parking_text: f(paidParking, paidParking, page, paidParking ? 0.82 : 0),
+    elevator_count: f(n(elevator.total), elevator.detail, page, elevator.total ? 0.9 : 0),
+    elevator_detail: f(elevator.detail, elevator.detail, page, elevator.detail ? 0.92 : 0),
+    parking_total: f(n(parking), parking, page, parking ? 0.92 : 0),
+    free_parking_text: f(freeParking, freeParking, page, freeParking ? 0.9 : 0),
+    paid_parking_text: f(paidParking, paidParking, page, paidParking ? 0.9 : 0),
     typical_floor_leasable_sqm: f(n(typicalLeaseSqm), typicalLeaseSqm, page, typicalLeaseSqm ? 0.9 : 0),
     typical_floor_leasable_py: f(n(typicalLeasePy), typicalLeasePy, page, typicalLeasePy ? 0.9 : 0),
     typical_floor_exclusive_sqm: f(n(typicalExclusiveSqm), typicalExclusiveSqm, page, typicalExclusiveSqm ? 0.9 : 0),

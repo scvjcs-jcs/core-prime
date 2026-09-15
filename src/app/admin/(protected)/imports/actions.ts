@@ -869,10 +869,94 @@ function parseFirstStation(accessText: string | null): { line_name: string | nul
   return { line_name: line, station_name: station, description: accessText.trim() };
 }
 
+const CBRE_FACTS_ENRICHMENT_VERSION = "CBRE-BUILDING-FACTS-v1.20.0";
+
+type CbreFactsProgress = {
+  error?: string;
+  nextOffset?: number;
+  totalBuildings?: number;
+  done?: boolean;
+};
+
+function valuesEquivalent(a: unknown, b: unknown): boolean {
+  if (a === null || a === undefined || a === "" || b === null || b === undefined || b === "") return false;
+  if (typeof a === "number" || typeof b === "number") {
+    const na = Number(a), nb = Number(b);
+    return Number.isFinite(na) && Number.isFinite(nb) && Math.abs(na - nb) < 0.0001;
+  }
+  return String(a).trim() === String(b).trim();
+}
+
+function looksLikeContaminatedParkingText(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const v = value.replace(/\s+/g, " ").trim();
+  return /(?:임대면적|전용면적)\s*\([\d,.]+\s*평\)/i.test(v)
+    || /(?:무료주차|유료주차|기준층|Availabilities)/i.test(v)
+    || /전용면적\s*층당\s*[\d,.]+\s*대/i.test(v);
+}
+
+function factPairWarning(data: Record<string, unknown>, sqmKey: string, pyKey: string, label: string): string | null {
+  const sqm = extractedFieldValue<number>(data, sqmKey);
+  const py = extractedFieldValue<number>(data, pyKey);
+  if (sqm == null || py == null || sqm <= 0 || py <= 0) return null;
+  const ratio = sqm / py;
+  return ratio < 3.20 || ratio > 3.42 ? `${label} ㎡/평 환산값 불일치` : null;
+}
+
+export async function getCbreBuildingFactsEnrichmentProgress(sourceDocumentId: string): Promise<CbreFactsProgress> {
+  const { supabase, admin, error: authError } = await requireAdmin();
+  if (!admin) return { error: authError ?? "관리자 권한이 없는 계정입니다." };
+
+  const { data: run } = await supabase
+    .from("parsing_runs")
+    .select("id,status")
+    .eq("source_document_id", sourceDocumentId)
+    .eq("parser_version", "TEXT-EXTRACT-v1.0.0")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!run || run.status !== "COMPLETED") return { error: "완료된 PDF 원문 추출 결과가 필요합니다." };
+
+  const { count } = await supabase
+    .from("staging_buildings")
+    .select("id", { count: "exact", head: true })
+    .eq("source_document_id", sourceDocumentId)
+    .eq("parsing_run_id", run.id);
+  const totalBuildings = count ?? 0;
+
+  const { data: logs } = await supabase
+    .from("audit_logs")
+    .select("after_data,created_at")
+    .eq("entity_type", "source_document")
+    .eq("entity_id", sourceDocumentId)
+    .eq("action", "ENRICH_CBRE_BUILDING_FACTS")
+    .order("created_at", { ascending: false })
+    .limit(40);
+
+  // The newest compatible log is the checkpoint for the CURRENT run. Do not take a max
+  // across older completed runs, or an interrupted second run could incorrectly look complete.
+  const latestCompatible = (logs ?? []).find((row) => {
+    const d = (row.after_data ?? {}) as Record<string, unknown>;
+    return d.enrichment_version === CBRE_FACTS_ENRICHMENT_VERSION;
+  });
+  if (!latestCompatible) return { nextOffset: 0, totalBuildings, done: false };
+
+  const latestData = (latestCompatible.after_data ?? {}) as Record<string, unknown>;
+  const latestTo = Number(latestData.processed_to ?? 0);
+  const latestDone = latestData.done === true;
+  // A completed run intentionally starts at 0 when the admin explicitly runs enrichment again.
+  const nextOffset = latestDone || (Number.isFinite(latestTo) && latestTo >= totalBuildings)
+    ? 0
+    : (Number.isFinite(latestTo) ? Math.max(0, latestTo) : 0);
+  return { nextOffset, totalBuildings, done: false };
+}
+
 /**
- * CBRE 원문에서 건물 일반정보(연면적/규모/전용률/엘리베이터/주차/기준층 등)를 다시 읽어
- * 이미 매칭/등록된 canonical building에 "비어 있는 값만" 보강합니다.
- * 기존에 관리자가 입력한 값은 절대 덮어쓰지 않습니다.
+ * CBRE 기본정보 보강 v1.20
+ * - 전체 367페이지를 매 배치마다 다시 읽지 않고, 현재 12개 staging 건물의 원본 페이지만 읽습니다.
+ * - 빈 값 우선 보강을 유지합니다.
+ * - 이전 CBRE 자동보강값과 현재 canonical 값이 정확히 같고, 새 파서가 더 깨끗한 값을 추출한 경우에만
+ *   해당 자동보강값을 교정합니다. 관리자 수동입력으로 보이는 값은 덮어쓰지 않습니다.
  */
 export async function enrichCbreBuildingFacts(
   sourceDocumentId: string,
@@ -883,8 +967,10 @@ export async function enrichCbreBuildingFacts(
   parsedBuildings?: number;
   matchedBuildings?: number;
   updatedBuildings?: number;
+  correctedBuildings?: number;
   parkingUpdated?: number;
   transportAdded?: number;
+  reviewNeeded?: number;
   skipped?: number;
   processedFrom?: number;
   processedTo?: number;
@@ -913,64 +999,115 @@ export async function enrichCbreBuildingFacts(
     .maybeSingle();
   if (!run || run.status !== "COMPLETED") return { error: "완료된 PDF 원문 추출 결과가 필요합니다." };
 
-  const { data: pages, error: pageError } = await supabase
+  const safeOffset = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
+  const safeLimit = Number.isFinite(limit) ? Math.min(20, Math.max(1, Math.floor(limit))) : 12;
+
+  const { data: stagingRows, error: stagingError, count } = await supabase
+    .from("staging_buildings")
+    .select("id,raw_building_name,normalized_building_name,primary_source_page,matched_building_id,extracted_data", { count: "exact" })
+    .eq("source_document_id", sourceDocumentId)
+    .eq("parsing_run_id", run.id)
+    .order("primary_source_page", { ascending: true })
+    .order("id", { ascending: true })
+    .range(safeOffset, safeOffset + safeLimit - 1);
+  if (stagingError) return { error: stagingError.message };
+
+  const totalBuildings = count ?? 0;
+  if (totalBuildings < 100) return { error: `CBRE staging 품질검사 실패: 건물 ${totalBuildings}개. 기존 데이터는 변경하지 않았습니다.` };
+  const batch = stagingRows ?? [];
+  const sourcePages = [...new Set(batch.map((s) => Number(s.primary_source_page)).filter((x) => Number.isFinite(x) && x > 0))];
+  const { data: pages, error: pageError } = sourcePages.length ? await supabase
     .from("source_document_pages")
     .select("page_number,extracted_text")
     .eq("parsing_run_id", run.id)
-    .order("page_number", { ascending: true });
+    .in("page_number", sourcePages) : { data: [], error: null };
   if (pageError) return { error: pageError.message };
+  const pageText = new Map<number, string | null>((pages ?? []).map((p: { page_number: number; extracted_text: string | null }) => [p.page_number, p.extracted_text]));
 
-  const parsed = parseCBREPages((pages ?? []).map((p: { page_number: number; extracted_text: string | null }) => ({ page_number: p.page_number, extracted_text: p.extracted_text })));
-  if (parsed.buildings.length < 100) return { error: `CBRE 건물 정보 재추출 품질검사 실패: 건물 ${parsed.buildings.length}개 감지. 기존 데이터는 변경하지 않았습니다.` };
+  const buildingIds = [...new Set(batch.map((s) => s.matched_building_id).filter((x): x is string => Boolean(x)))];
+  const { data: currentRows, error: currentRowsError } = buildingIds.length ? await supabase
+    .from("buildings")
+    .select("id,road_address,completion_year,completion_month,basement_floors,above_ground_floors,gross_floor_area,efficiency_ratio,elevator_count,elevator_detail,typical_floor_leasable_area_sqm,typical_floor_leasable_area_py,typical_floor_exclusive_area_sqm,typical_floor_exclusive_area_py")
+    .in("id", buildingIds) : { data: [], error: null };
+  if (currentRowsError) return { error: currentRowsError.message };
+  const currentById = new Map<string, any>((currentRows ?? []).map((row: any) => [row.id, row]));
 
-  const { data: stagingRows, error: stagingError } = await supabase
-    .from("staging_buildings")
-    .select("id,raw_building_name,normalized_building_name,primary_source_page,matched_building_id,extracted_data")
-    .eq("source_document_id", sourceDocumentId)
-    .eq("parsing_run_id", run.id);
-  if (stagingError) return { error: stagingError.message };
+  const { data: parkingRows, error: parkingRowsError } = buildingIds.length ? await supabase
+    .from("building_parking")
+    .select("id,building_id,total_spaces,free_parking_text,paid_parking_text")
+    .in("building_id", buildingIds) : { data: [], error: null };
+  if (parkingRowsError) return { error: parkingRowsError.message };
+  const parkingByBuilding = new Map<string, any>((parkingRows ?? []).map((row: any) => [row.building_id, row]));
 
-  const byPage = new Map<number, any[]>();
-  for (const s of stagingRows ?? []) {
-    const arr = byPage.get(s.primary_source_page) ?? [];
-    arr.push(s);
-    byPage.set(s.primary_source_page, arr);
-  }
+  const { data: transportRows, error: transportRowsError } = buildingIds.length ? await supabase
+    .from("building_transportation")
+    .select("building_id")
+    .in("building_id", buildingIds) : { data: [], error: null };
+  if (transportRowsError) return { error: transportRowsError.message };
+  const hasTransportation = new Set<string>((transportRows ?? []).map((row: any) => row.building_id));
 
   let matchedBuildings = 0;
   let updatedBuildings = 0;
+  let correctedBuildings = 0;
   let parkingUpdated = 0;
   let transportAdded = 0;
+  let reviewNeeded = 0;
   let skipped = 0;
 
-  // Vercel server actions should stay short-lived. Process a small deterministic batch so
-  // 200+ buildings never turn into a single N+1 request burst / function timeout.
-  const safeOffset = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
-  const safeLimit = Number.isFinite(limit) ? Math.min(20, Math.max(1, Math.floor(limit))) : 12;
-  const batch = parsed.buildings.slice(safeOffset, safeOffset + safeLimit);
+  for (const s of batch) {
+    if (!s.matched_building_id) { skipped += 1; continue; }
+    const text = pageText.get(Number(s.primary_source_page));
+    if (!text?.trim()) { skipped += 1; continue; }
 
-  for (const pb of batch) {
-    const pageCandidates = byPage.get(pb.primary_source_page) ?? [];
-    let s = pageCandidates.find((x) => normalizeTitleForJoin(x.raw_building_name) === normalizeTitleForJoin(pb.raw_building_name));
-    if (!s && pageCandidates.length === 1) s = pageCandidates[0];
-    if (!s?.matched_building_id) { skipped += 1; continue; }
+    const parsed = parseCBREPages([{ page_number: Number(s.primary_source_page), extracted_text: text }]);
+    let pb = parsed.buildings.find((x) => normalizeTitleForJoin(x.raw_building_name) === normalizeTitleForJoin(s.raw_building_name));
+    if (!pb && parsed.buildings.length === 1) pb = parsed.buildings[0];
+    if (!pb) { skipped += 1; continue; }
     matchedBuildings += 1;
 
     const richer = pb.extracted_data as Record<string, unknown>;
-    const mergedStaging = { ...((s.extracted_data ?? {}) as Record<string, unknown>), ...richer, _building_facts_version: "CBRE-BUILDING-FACTS-v1.14.0" };
-    await supabase.from("staging_buildings").update({ extracted_data: mergedStaging }).eq("id", s.id);
+    const oldExtracted = (s.extracted_data ?? {}) as Record<string, unknown>;
+    const oldFactsVersion = typeof oldExtracted._building_facts_version === "string" ? oldExtracted._building_facts_version : null;
+    const hasPreviousAutoFacts = Boolean(oldFactsVersion?.startsWith("CBRE-BUILDING-FACTS-"));
+    let correctedThisBuilding = false;
+    const factWarnings = [
+      factPairWarning(richer, "gross_floor_area_sqm", "gross_floor_area_py", "연면적"),
+      factPairWarning(richer, "typical_floor_leasable_sqm", "typical_floor_leasable_py", "기준층 임대면적"),
+      factPairWarning(richer, "typical_floor_exclusive_sqm", "typical_floor_exclusive_py", "기준층 전용면적"),
+    ].filter((x): x is string => Boolean(x));
+    if (factWarnings.length) reviewNeeded += 1;
 
-    const { data: current, error: currentError } = await supabase
-      .from("buildings")
-      .select("id,road_address,completion_year,completion_month,basement_floors,above_ground_floors,gross_floor_area,efficiency_ratio,elevator_count,elevator_detail,typical_floor_leasable_area_sqm,typical_floor_leasable_area_py,typical_floor_exclusive_area_sqm,typical_floor_exclusive_area_py")
-      .eq("id", s.matched_building_id)
-      .maybeSingle();
-    if (currentError || !current) { skipped += 1; continue; }
+    const mergedStaging = {
+      ...oldExtracted,
+      ...richer,
+      _building_facts_version: CBRE_FACTS_ENRICHMENT_VERSION,
+      _building_fact_warnings: factWarnings,
+    };
 
+    const current = currentById.get(s.matched_building_id);
+    if (!current) { skipped += 1; continue; }
+
+    // Canonical building fields remain fill-only. We intentionally do not overwrite a populated
+    // building field because it may have been manually reviewed/edited by an administrator.
     const patch: Record<string, unknown> = {};
-    const fill = (column: string, currentValue: unknown, key: string) => {
+    const fill = (column: string, currentValue: unknown, key: string, allowPreviousAutoCorrection = false) => {
       const next = extractedFieldValue(richer, key);
-      if ((currentValue === null || currentValue === undefined || currentValue === "") && next !== null) patch[column] = next;
+      if (next === null) return;
+      if (currentValue === null || currentValue === undefined || currentValue === "") {
+        patch[column] = next;
+        return;
+      }
+      // Only correct a populated canonical field when we can prove it still equals the value
+      // previously written by CORE PRIME's own enrichment. This protects later admin edits.
+      if (allowPreviousAutoCorrection && hasPreviousAutoFacts) {
+        const previousAutoValue = extractedFieldValue(oldExtracted, key);
+        if (previousAutoValue !== null
+          && valuesEquivalent(currentValue, previousAutoValue)
+          && !valuesEquivalent(previousAutoValue, next)) {
+          patch[column] = next;
+          correctedThisBuilding = true;
+        }
+      }
     };
     fill("completion_year", current.completion_year, "completion_year");
     fill("completion_month", current.completion_month, "completion_month");
@@ -978,8 +1115,10 @@ export async function enrichCbreBuildingFacts(
     fill("above_ground_floors", current.above_ground_floors, "above_ground_floors");
     fill("gross_floor_area", current.gross_floor_area, "gross_floor_area_sqm");
     fill("efficiency_ratio", current.efficiency_ratio, "efficiency_ratio");
-    fill("elevator_count", current.elevator_count, "elevator_count");
-    fill("elevator_detail", current.elevator_detail, "elevator_detail");
+    // v1.14.3 had a few PDF row-order edge cases in elevator values/details. Safe-correct only
+    // when the current DB value is still exactly the prior auto-extracted value.
+    fill("elevator_count", current.elevator_count, "elevator_count", true);
+    fill("elevator_detail", current.elevator_detail, "elevator_detail", true);
     fill("typical_floor_leasable_area_sqm", current.typical_floor_leasable_area_sqm, "typical_floor_leasable_sqm");
     fill("typical_floor_leasable_area_py", current.typical_floor_leasable_area_py, "typical_floor_leasable_py");
     fill("typical_floor_exclusive_area_sqm", current.typical_floor_exclusive_area_sqm, "typical_floor_exclusive_sqm");
@@ -991,19 +1130,40 @@ export async function enrichCbreBuildingFacts(
       updatedBuildings += 1;
     }
 
-    const { data: parking } = await supabase
-      .from("building_parking")
-      .select("id,total_spaces,free_parking_text,paid_parking_text")
-      .eq("building_id", current.id)
-      .maybeSingle();
+    const parking = parkingByBuilding.get(current.id) ?? null;
     const totalSpaces = extractedFieldValue<number>(richer, "parking_total");
     const freeParkingText = extractedFieldValue<string>(richer, "free_parking_text");
     const paidParkingText = extractedFieldValue<string>(richer, "paid_parking_text");
+    const oldFreeParking = extractedFieldValue<string>(oldExtracted, "free_parking_text");
+    const oldPaidParking = extractedFieldValue<string>(oldExtracted, "paid_parking_text");
     if (parking) {
       const pp: Record<string, unknown> = {};
       if (parking.total_spaces == null && totalSpaces != null) pp.total_spaces = totalSpaces;
+      else if (hasPreviousAutoFacts && totalSpaces != null) {
+        const oldParkingTotal = extractedFieldValue<number>(oldExtracted, "parking_total");
+        if (oldParkingTotal != null
+          && valuesEquivalent(parking.total_spaces, oldParkingTotal)
+          && !valuesEquivalent(oldParkingTotal, totalSpaces)) {
+          pp.total_spaces = totalSpaces;
+          correctedThisBuilding = true;
+        }
+      }
       if (!parking.free_parking_text && freeParkingText) pp.free_parking_text = freeParkingText;
+      else if (oldFreeParking && freeParkingText
+        && valuesEquivalent(parking.free_parking_text, oldFreeParking)
+        && looksLikeContaminatedParkingText(oldFreeParking)
+        && !valuesEquivalent(oldFreeParking, freeParkingText)) {
+        pp.free_parking_text = freeParkingText;
+        correctedThisBuilding = true;
+      }
       if (!parking.paid_parking_text && paidParkingText) pp.paid_parking_text = paidParkingText;
+      else if (oldPaidParking && paidParkingText
+        && valuesEquivalent(parking.paid_parking_text, oldPaidParking)
+        && looksLikeContaminatedParkingText(oldPaidParking)
+        && !valuesEquivalent(oldPaidParking, paidParkingText)) {
+        pp.paid_parking_text = paidParkingText;
+        correctedThisBuilding = true;
+      }
       if (Object.keys(pp).length > 0) {
         const { error } = await supabase.from("building_parking").update(pp).eq("id", parking.id);
         if (error) return { error: `주차정보 저장 실패: ${error.message}` };
@@ -1016,18 +1176,27 @@ export async function enrichCbreBuildingFacts(
     }
 
     const subwayText = extractedFieldValue<string>(richer, "subway_access_text");
-    if (subwayText && /역/.test(subwayText)) {
-      const { count } = await supabase.from("building_transportation").select("id", { count: "exact", head: true }).eq("building_id", current.id);
-      if ((count ?? 0) === 0) {
-        const t = parseFirstStation(subwayText);
-        if (t) {
-          const { error } = await supabase.from("building_transportation").insert({ building_id: current.id, transport_type: "지하철", ...t });
-          if (!error) transportAdded += 1;
+    if (subwayText && /역/.test(subwayText) && !hasTransportation.has(current.id)) {
+      const t = parseFirstStation(subwayText);
+      if (t) {
+        const { error } = await supabase.from("building_transportation").insert({ building_id: current.id, transport_type: "지하철", ...t });
+        if (!error) {
+          transportAdded += 1;
+          hasTransportation.add(current.id);
         }
       }
     }
+
+    if (correctedThisBuilding) correctedBuildings += 1;
+
+    // Staging is written last so a mid-building failure cannot destroy the previous-auto-value
+    // evidence needed for a safe correction on retry.
+    const { error: stagingUpdateError } = await supabase.from("staging_buildings").update({ extracted_data: mergedStaging }).eq("id", s.id);
+    if (stagingUpdateError) return { error: `staging 보강정보 저장 실패: ${stagingUpdateError.message}` };
   }
 
+  const nextOffset = Math.min(safeOffset + batch.length, totalBuildings);
+  const done = nextOffset >= totalBuildings;
   await supabase.from("audit_logs").insert({
     actor_type: "ADMIN",
     actor_id: admin.id,
@@ -1035,35 +1204,39 @@ export async function enrichCbreBuildingFacts(
     entity_type: "source_document",
     entity_id: sourceDocumentId,
     after_data: {
+      enrichment_version: CBRE_FACTS_ENRICHMENT_VERSION,
       parser_version: CBRE_PARSER_VERSION,
-      parsed_buildings: parsed.buildings.length,
+      parsed_buildings: totalBuildings,
       processed_from: safeOffset,
-      processed_to: Math.min(safeOffset + batch.length, parsed.buildings.length),
+      processed_to: nextOffset,
       matched_buildings: matchedBuildings,
       updated_buildings: updatedBuildings,
+      corrected_buildings: correctedBuildings,
       parking_updated: parkingUpdated,
       transport_added: transportAdded,
+      review_needed: reviewNeeded,
       skipped,
+      done,
     },
   });
 
-  const nextOffset = Math.min(safeOffset + batch.length, parsed.buildings.length);
-  const done = nextOffset >= parsed.buildings.length;
   revalidatePath(`/admin/imports/${sourceDocumentId}`);
   if (done) {
     revalidatePath("/admin/buildings");
     revalidatePath("/buildings");
   }
   return {
-    parsedBuildings: parsed.buildings.length,
+    parsedBuildings: totalBuildings,
     matchedBuildings,
     updatedBuildings,
+    correctedBuildings,
     parkingUpdated,
     transportAdded,
+    reviewNeeded,
     skipped,
     processedFrom: safeOffset,
     processedTo: nextOffset,
-    totalBuildings: parsed.buildings.length,
+    totalBuildings,
     nextOffset,
     done,
   };

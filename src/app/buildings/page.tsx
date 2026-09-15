@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 import { logPageView } from "@/lib/analytics";
 import ComparePicker from "@/components/ComparePicker";
 import FreshnessChip from "@/components/FreshnessChip";
+import { activeListingStatus } from "@/lib/publicData";
 
 export const metadata: Metadata = {
   title: "프라임 오피스 찾기",
@@ -40,7 +41,7 @@ function scoreOf(b: RawBuilding): number | null {
 }
 
 function activeListingsOf(b: RawBuilding) {
-  return (b.listings ?? []).filter((l) => l.is_published && ["available", "negotiating"].includes(l.status));
+  return (b.listings ?? []).filter((l) => l.is_published && activeListingStatus(l.status));
 }
 
 function formatRent(n: number | null | undefined) {
@@ -48,7 +49,7 @@ function formatRent(n: number | null | undefined) {
   return `${Number(n).toLocaleString("ko-KR")}원/평`;
 }
 
-export default async function BuildingsPage({ searchParams }: { searchParams: Promise<{ q?: string; district?: string; minYear?: string; minScore?: string; grade?: string; minAreaPy?: string; maxRentPerPy?: string; availableOnly?: string; sort?: string }> }) {
+export default async function BuildingsPage({ searchParams }: { searchParams: Promise<{ q?: string; district?: string; minYear?: string; minScore?: string; grade?: string; minAreaPy?: string; maxRentPerPy?: string; availableOnly?: string; sort?: string; page?: string }> }) {
   const params = await searchParams;
   const supabase = await createClient();
 
@@ -90,6 +91,22 @@ export default async function BuildingsPage({ searchParams }: { searchParams: Pr
   if (sort === "area") buildings.sort((a,b)=>minArea(a)-minArea(b));
   if (sort === "score") buildings.sort((a,b)=>(scoreOf(b)??-1)-(scoreOf(a)??-1));
   if (sort === "latest") buildings.sort((a,b)=>String(b.data_last_verified_at??"").localeCompare(String(a.data_last_verified_at??"")));
+
+  const totalBuildings = buildings.length;
+  const pageSize = 24;
+  const totalPages = Math.max(1, Math.ceil(totalBuildings / pageSize));
+  const requestedPage = Number(params.page ?? "1");
+  const currentPage = Number.isFinite(requestedPage) ? Math.min(totalPages, Math.max(1, Math.floor(requestedPage))) : 1;
+  const pageBuildings = buildings.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  const queryStringForPage = (page: number) => {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (key !== "page" && value) query.set(key, String(value));
+    });
+    if (page > 1) query.set("page", String(page));
+    return `/buildings${query.toString() ? `?${query.toString()}` : ""}`;
+  };
 
   const hasFilters = Boolean(q || params.district || params.minYear || params.minScore || params.grade || params.minAreaPy || params.maxRentPerPy || params.availableOnly === "1");
 
@@ -141,26 +158,26 @@ export default async function BuildingsPage({ searchParams }: { searchParams: Pr
           </div>
         </form>
 
-        <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-          <div><p className="text-sm text-charcoal"><b className="tabular-nums">{buildings.length}</b>개 건물</p>{hasFilters && <p className="mt-1 text-xs text-silver">현재 입력한 조건을 적용한 결과입니다.</p>}</div>
+        <div className="sticky top-[68px] z-20 -mx-2 mb-5 flex flex-col gap-3 border-y border-silver/20 bg-fog/95 px-2 py-3 backdrop-blur lg:flex-row lg:items-center lg:justify-between">
+          <div><p className="text-sm text-charcoal"><b className="tabular-nums">{totalBuildings}</b>개 건물</p>{hasFilters && <p className="mt-1 text-xs text-silver">현재 입력한 조건을 적용한 결과입니다.</p>}</div>
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <form method="get" className="flex items-center gap-2">
-              {Object.entries(params).filter(([k,v])=>k!=="sort" && v).map(([k,v])=><input key={k} type="hidden" name={k} value={String(v)} />)}
+              {Object.entries(params).filter(([k,v])=>k!=="sort" && k!=="page" && v).map(([k,v])=><input key={k} type="hidden" name={k} value={String(v)} />)}
               <label className="text-xs text-silver" htmlFor="sort">정렬</label>
               <select id="sort" name="sort" defaultValue={sort} onChange={undefined} className="border border-silver/40 bg-white px-3 py-2 text-xs">
                 <option value="recommended">추천순</option><option value="latest">최근 확인순</option><option value="rent">임대료 낮은순</option><option value="area">면적 작은순</option><option value="score">Prime Score순</option>
               </select>
               <button className="border border-silver/40 bg-white px-3 py-2 text-xs">적용</button>
             </form>
-            {buildings.length >= 2 && <ComparePicker items={buildings.map((b) => ({ id: b.id, name: b.name }))} />}
+            {totalBuildings >= 2 && <ComparePicker items={buildings.map((b) => ({ id: b.id, name: b.name }))} />}
           </div>
         </div>
 
-        {buildings.length === 0 ? (
+        {totalBuildings === 0 ? (
           <div className="border border-dashed border-silver/40 bg-white px-6 py-20 text-center"><h2 className="text-lg font-medium">조건에 맞는 공개 빌딩이 없습니다.</h2><p className="mt-2 text-sm text-silver kr-text">조건을 조금 넓히거나 상담을 남겨주시면 공개 전 공실까지 포함해 확인해 드립니다.</p><Link href="/advisory" className="mt-6 inline-block bg-navy px-5 py-2.5 text-sm text-white">맞춤 제안 요청</Link></div>
         ) : (
           <div className="grid grid-cols-1 gap-7 md:grid-cols-2 lg:grid-cols-3">
-            {buildings.map((b) => {
+            {pageBuildings.map((b) => {
               const img = primaryImageOf(b);
               const score = scoreOf(b);
               const active = activeListingsOf(b);
@@ -168,7 +185,7 @@ export default async function BuildingsPage({ searchParams }: { searchParams: Pr
               const rents = active.map((l) => l.rent_per_py).filter((v): v is number => v != null).sort((a, c) => a - c);
               const latestReport = active.map((l) => l.report_date).filter((v): v is string => Boolean(v)).sort().at(-1) ?? null;
               return (
-                <Link key={b.id} href={`/buildings/${b.slug}`} className="group block overflow-hidden border border-silver/25 bg-white transition hover:-translate-y-0.5 hover:shadow-xl">
+                <Link key={b.id} href={`/buildings/${b.slug}`} className="public-card-hover group block overflow-hidden border border-silver/25 bg-white">
                   <div className="relative h-48 overflow-hidden bg-fog">{img ? <img src={img} alt={b.name} className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]" /> : <div className="flex h-full items-center justify-center bg-gradient-to-br from-fog to-silver/20 text-xs tracking-[.18em] text-silver">CORE PRIME</div>}<span className={`absolute left-3 top-3 px-2.5 py-1 text-xs ${active.length ? "bg-navy text-white" : "bg-white/95 text-silver"}`}>{active.length ? `현재 공실 ${active.length}건` : "공실 문의"}</span></div>
                   <div className="p-5"><div className="flex items-center justify-between gap-3 text-xs text-silver"><span>{b.districts?.name ?? "권역 미정"}</span><span>{b.building_grade ?? "등급 미정"}</span></div><h2 className="mt-2 font-display text-xl kr-text">{b.name}</h2><p className="mt-2 min-h-[2.5rem] text-xs leading-5 text-silver kr-text">{b.road_address ?? b.address ?? "주소 정보 준비중"}</p>
                     <div className="mt-4 grid grid-cols-2 gap-2 border-t border-silver/20 pt-4 text-xs"><div><p className="text-silver">전용면적</p><p className="mt-1 font-medium">{areas.length ? `${Number(areas[0]).toLocaleString()}평부터` : "문의"}</p></div><div><p className="text-silver">평당 임대료</p><p className="mt-1 font-medium">{rents.length ? `${formatRent(rents[0])}부터` : "문의"}</p></div></div>
@@ -179,6 +196,17 @@ export default async function BuildingsPage({ searchParams }: { searchParams: Pr
             })}
           </div>
         )}
+
+        {totalBuildings > pageSize && (
+          <nav className="mt-10 flex flex-wrap items-center justify-center gap-2" aria-label="오피스 검색 페이지">
+            <Link aria-disabled={currentPage === 1} href={queryStringForPage(Math.max(1, currentPage - 1))} className={`border px-3 py-2 text-xs ${currentPage === 1 ? "pointer-events-none border-silver/20 text-silver/50" : "border-silver/40 bg-white text-charcoal hover:border-navy"}`}>이전</Link>
+            {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
+              <Link key={page} aria-current={page === currentPage ? "page" : undefined} href={queryStringForPage(page)} className={`min-w-9 border px-3 py-2 text-center text-xs ${page === currentPage ? "border-navy bg-navy text-white" : "border-silver/40 bg-white text-charcoal hover:border-navy"}`}>{page}</Link>
+            ))}
+            <Link aria-disabled={currentPage === totalPages} href={queryStringForPage(Math.min(totalPages, currentPage + 1))} className={`border px-3 py-2 text-xs ${currentPage === totalPages ? "pointer-events-none border-silver/20 text-silver/50" : "border-silver/40 bg-white text-charcoal hover:border-navy"}`}>다음</Link>
+          </nav>
+        )}
+        {totalBuildings > pageSize && <p className="mt-3 text-center text-[11px] text-silver">{totalBuildings}개 중 {(currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, totalBuildings)} 표시</p>}
       </div>
     </main>
   );
